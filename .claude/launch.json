@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "badminton",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8777",
+        "--directory",
+        "/Users/dongwook/Projects/pocket/badminton"
+      ],
+      "port": 8777
+    }
+  ]
+}
