@@ -55,10 +55,10 @@ const AFTER = { 1: ["#fff3a0", "#d8a030", "#6a4a20"].map(C), 2: ["#ffe08a", "#d0
 
 // ---------------------------------------------------------------- input
 const CONTROLS = {
-  1: { left: ["KeyA"], right: ["KeyD"], up: ["KeyW"], down: ["KeyS"], basic: ["KeyF"], zap: ["KeyG"], tail: ["KeyH"], quick: ["KeyT"] },
+  1: { left: ["KeyA"], right: ["KeyD"], up: ["KeyW"], down: ["KeyS"], basic: ["KeyF"], zap: ["KeyG"], quick: ["KeyH"] },
   2: {
     left: ["ArrowLeft"], right: ["ArrowRight"], up: ["ArrowUp"], down: ["ArrowDown"],
-    basic: ["KeyK", "Numpad1"], zap: ["KeyL", "Numpad2"], tail: ["Semicolon", "Numpad3"], quick: ["KeyO", "Numpad0"],
+    basic: ["KeyK", "Numpad1"], zap: ["KeyL", "Numpad2"], quick: ["Semicolon", "Numpad3"],
   },
 };
 // online, each player may use either layout on their own keyboard
@@ -281,8 +281,7 @@ function updatePlayer(p, dt) {
     if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
     if (pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
     else if (!p.act && p.quickT <= 0) {
-      if (pPressed(p, c.tail) && p.cd.tail <= 0) startAct(p, "tail");
-      else if (pPressed(p, c.zap) && p.cd.zap <= 0) startAct(p, "zap");
+      if (pPressed(p, c.zap) && p.cd.zap <= 0) startAct(p, "zap");
       else if (pPressed(p, c.basic)) startAct(p, "basic");
     }
     if (pPressed(p, c.up) && p.ground && p.quickT <= 0 && !(p.act && p.act.type === "tail")) {
@@ -339,7 +338,11 @@ function updatePlayer(p, dt) {
   a.t += dt;
   if (a.type === "basic" && a.t >= BASIC.on && a.t <= BASIC.off) {
     const hx = p.x + p.face * 12, hy = p.y - 18;
-    if (!a.hitS && canHitShuttle(p) && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS) ((a.hitS = true), hitShuttle(p, "basic"));
+    if (!a.hitS && canHitShuttle(p) && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS) {
+      a.hitS = true;
+      if (p.ground) hitShuttle(p, "basic");
+      else ironTail(p); // in the air, the swing turns into Iron Tail: a smash
+    }
     if (!a.hitP && canBeHit(o) && circleBox(p.x + p.face * 14, p.y - 16, BASIC.reachP, hurtbox(o))) {
       a.hitP = true;
       stunPlayer(o, "basic", p);
@@ -369,6 +372,12 @@ function updatePlayer(p, dt) {
     bolts.push({ owner: p, x: p.x + p.face * 14, y: p.y - 15, vx: p.face * ZAP.speed, life: 1.6, seed: (Math.random() * 1e6) | 0 });
   }
   if (a.t >= (a.type === "basic" ? BASIC.dur : a.type === "tail" ? TAIL.dur : ZAP.dur)) p.act = null;
+}
+// Iron Tail has no key of its own: a basic attack that meets the shuttle in mid-air becomes it. Pikachu spins,
+// the tail turns to steel and the shuttle is smashed. It only ever hits the shuttle, never the other player.
+function ironTail(p) {
+  p.act = { type: "tail", t: TAIL.on, hitS: true, hitP: true, fired: false, fx: false };
+  hitShuttle(p, "tail");
 }
 const canHitShuttle = (p) => S.state === "fly" || (S.state === "serve" && game.server === p);
 
@@ -509,11 +518,6 @@ function drawNet(p) {
 }
 
 function drawPlayer(p, P) {
-  // floor shadow, smaller the higher they are
-  const hgt = clamp((FLOOR - p.y) / 80, 0, 1);
-  P.place(0, 0);
-  P.ellipse(Math.round(p.x), FLOOR + 1, Math.round(11 - hgt * 5), 2, C("#0a0812"), 0.55);
-
   let flip = p.face > 0, pal = p.pal, ox = 0, oy = 0, tint;
   const a = p.act;
   if (a?.type === "tail") {
@@ -614,9 +618,9 @@ function drawHud(P) {
   P.text(`${P1.score}`, NET_X - 18, 10, P1.tag, { font: "big", scale: 2, align: "center", outline: INK });
   P.text("-", NET_X, 14, C("#c8c4dc"), { font: "big", align: "center", outline: INK });
   P.text(`${P2.score}`, NET_X + 18, 10, P2.tag, { font: "big", scale: 2, align: "center", outline: INK });
-  const skills = [["ZAP", "zap", ZAP.cd], ["TAIL", "tail", TAIL.cd], ["DASH", "quick", QUICK.cd]];
+  const skills = [["ZAP", "zap", ZAP.cd], ["DASH", "quick", QUICK.cd]];
   for (const p of PLAYERS) {
-    const left = p === P1, x0 = left ? 8 : W - 8 - 3 * 30;
+    const left = p === P1, x0 = left ? 8 : W - 8 - skills.length * 30 + 6;
     P.text(`${p.id}P`, left ? 8 : W - 8, 9, p.tag, { font: "big", align: left ? "left" : "right", outline: INK });
     skills.forEach(([label, key, cd], i) => {
       const x = x0 + i * 30, y = 20, ready = p.cd[key] <= 0, k = 1 - p.cd[key] / cd;
@@ -764,6 +768,10 @@ function peerOptions() {
   return { debug: 1, config: { iceServers: ICE_SERVERS, ...(relayOnly ? { iceTransportPolicy: "relay" } : {}) } };
 }
 
+// The usual cause on a Mac: the browser lacks macOS's Local Network permission, so it cannot resolve the other
+// side's ".local" (mDNS) address and silently drops every candidate it receives.
+const NET_HINT = "맥이라면 시스템 설정 → 개인정보 보호 및 보안 → 로컬 네트워크에서 브라우저가 켜져 있는지 확인해 주세요(켠 뒤 브라우저를 완전히 껐다 켜기).";
+
 // the PeerJS signaling server (0.peerjs.com) has to answer before anything else can happen
 function signalingTimeout(peer) {
   setTimeout(() => {
@@ -833,7 +841,7 @@ function watchConn(conn, who) {
   conn.on("error", async (err) => {
     const report = await iceReport(conn);
     console.warn(`[net] ${who} ${conn.label} error ${err.type}: ${report}`);
-    if (conn.label === "ctl" && !net.ctl?.open) ui.status(`${other} 직접 연결하지 못했어요 (${err.type}). 진단: ${report}`, "warn", who === "host" ? net.code : null);
+    if (conn.label === "ctl" && !net.ctl?.open) ui.status(`${other} 직접 연결하지 못했어요 (${err.type}). ${NET_HINT} 진단: ${report}`, "warn", who === "host" ? net.code : null);
   });
 }
 
@@ -858,7 +866,7 @@ function hostRoom() {
       console.warn(`[net] host: guest never connected: ${report}`);
       net.ctl = null;
       conn.close();
-      ui.status(`친구와 20초 동안 연결되지 않았어요. 진단: ${report}. 이 방 코드로 다시 들어올 수 있어요.`, "warn", code);
+      ui.status(`친구와 20초 동안 연결되지 않았어요. 이 방 코드로 다시 들어올 수 있어요. ${NET_HINT} 진단: ${report}`, "warn", code);
     }, 22000);
     conn.on("open", () => {
       setMode("host");
@@ -920,7 +928,7 @@ function joinRoom(raw) {
       const report = await iceReport(ctl);
       console.warn(`[net] guest timeout: ${report}`);
       leave(true);
-      ui.status(`20초 동안 연결되지 않았어요. 진단: ${report}`, "warn");
+      ui.status(`20초 동안 연결되지 않았어요. ${NET_HINT} 진단: ${report}`, "warn");
     }, 20000);
     ctl.on("open", () => {
       held.clear();
