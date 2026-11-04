@@ -44,6 +44,7 @@
     color: #e8e6f2; background: #0b0a12; border: 1px solid #3a3658; border-radius: 6px; padding: 6px 8px;
   }
   #room-input:disabled { opacity: 0.4; }
+  #room-input:focus { outline: 2px solid #ffd23c; outline-offset: 1px; cursor: text; }
   #room-code {
     font: 700 22px/1 ui-monospace, monospace; letter-spacing: 0.2em; color: #ffd23c; background: #24213a;
     border-radius: 6px; padding: 6px 10px; user-select: all;
@@ -59,7 +60,7 @@
     <strong>온라인 대전</strong>
     <button id="btn-host">방 만들기</button>
     <span class="muted">또는</span>
-    <input id="room-input" placeholder="방 코드" autocomplete="off" spellcheck="false" maxlength="5" aria-label="방 코드">
+    <input id="room-input" placeholder="방 코드" autocomplete="off" spellcheck="false" readonly aria-label="방 코드 (영문·숫자 5글자, 한/영 상관없이 입력돼요)">
     <button id="btn-join">참가</button>
     <button id="btn-leave" class="ghost" hidden>나가기</button>
     <span id="net-ping" class="muted"></span>

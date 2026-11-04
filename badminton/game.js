@@ -15,6 +15,7 @@ const W = 384, H = 216, FLOOR = 196, NET_X = 192, NET_TOP = 160, NET_BOTTOM = 18
 const GRAV = 900, JUMP_V = 330, RUN = 115;
 const SH_G = 420, SH_K = 0.0028;              // shuttle gravity and quadratic drag (tuned in a sim)
 const WIN = 11;
+const SERVE_GAP = 12; // during the serve, how close to the net a player's center may get
 const DT = 1 / 60;
 
 // move timings (seconds)
@@ -312,6 +313,11 @@ function updatePlayer(p, dt) {
   if (p.x < 12 || p.x > W - 12) {
     p.x = clamp(p.x, 12, W - 12);
     if (p.knocked) p.vx *= -0.3;
+  }
+  // until the serve is hit, each player stays on their own side of the net
+  if (game.state === "serve") {
+    if (p === P1 && p.x > NET_X - SERVE_GAP) (p.x = NET_X - SERVE_GAP), (p.vx = Math.min(p.vx, 0));
+    if (p === P2 && p.x < NET_X + SERVE_GAP) (p.x = NET_X + SERVE_GAP), (p.vx = Math.max(p.vx, 0));
   }
   if (p.knocked && p.ground && p.knockT > 0.05) {
     p.knocked = false;
@@ -747,18 +753,113 @@ function onCtl(d) {
   }
 }
 
+// ICE servers. PeerJS's own defaults (Google STUN + PeerJS TURN). Add "?relay=1" to the address to force every
+// connection through TURN, which is how to test what happens when a direct connection is impossible.
+const ICE_SERVERS = [
+  { urls: "stun:stun.l.google.com:19302" },
+  { urls: ["turn:eu-0.turn.peerjs.com:3478", "turn:us-0.turn.peerjs.com:3478"], username: "peerjs", credential: "peerjsp" },
+];
+function peerOptions() {
+  const relayOnly = new URLSearchParams(location.search).has("relay");
+  return { debug: 1, config: { iceServers: ICE_SERVERS, ...(relayOnly ? { iceTransportPolicy: "relay" } : {}) } };
+}
+
+// the PeerJS signaling server (0.peerjs.com) has to answer before anything else can happen
+function signalingTimeout(peer) {
+  setTimeout(() => {
+    if (net.peer !== peer || peer.open) return;
+    console.warn("[net] signaling server did not answer");
+    leave(true);
+    ui.status("PeerJS 서버(0.peerjs.com)에 10초 동안 접속하지 못했어요. 광고 차단 확장 프로그램이나 네트워크를 확인해 주세요.", "warn");
+  }, 10000);
+}
+
+// ---- connection diagnostics: which stage we reached and which ICE candidates were tried
+async function iceReport(conn) {
+  const pc = conn?.peerConnection;
+  if (!pc) return "WebRTC 연결이 만들어지지 않았어요";
+  const local = new Set(), remote = new Set();
+  let pairs = 0, ok = 0;
+  try {
+    (await pc.getStats()).forEach((s) => {
+      if (s.type === "local-candidate") local.add(s.candidateType);
+      if (s.type === "remote-candidate") remote.add(s.candidateType);
+      if (s.type === "candidate-pair") (pairs++, s.state === "succeeded" && ok++);
+    });
+  } catch {}
+  const list = (set) => [...set].join("/") || "없음";
+  const d = conn._diag ?? { sent: [], recv: [], errors: [] };
+  const kinds = (arr) => (arr.length ? `${arr.length}개(${[...new Set(arr)].join(",")})` : "0개");
+  return (
+    `ICE ${pc.iceConnectionState} · 내 후보 ${list(local)} · 상대 후보 ${list(remote)} · 후보 쌍 ${pairs}개 중 성공 ${ok}개` +
+    ` · 보낸 후보 ${kinds(d.sent)} · 받은 후보 ${kinds(d.recv)}` +
+    (d.errors.length ? ` · 후보 추가 오류 ${d.errors.length}번: ${d.errors[0]}` : "") +
+    ` · signaling ${pc.signalingState} · 상대 SDP ${pc.remoteDescription?.type ?? "없음"} · ${browserName()}`
+  );
+}
+const browserName = () => {
+  const ua = navigator.userAgent;
+  return /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? `Chrome ${ua.match(/Chrome\/(\d+)/)[1]}` : /Safari\//.test(ua) ? "Safari" : /Firefox\//.test(ua) ? "Firefox" : "기타 브라우저";
+};
+// count ICE candidates going out and coming in, and catch addIceCandidate errors (PeerJS swallows them)
+function instrument(conn) {
+  const pc = conn.peerConnection;
+  if (!pc || conn._diag) return;
+  const d = (conn._diag = { sent: [], recv: [], errors: [] });
+  const kind = (s) => {
+    const typ = / typ (\w+)/.exec(s ?? "")?.[1] ?? "?";
+    return typ === "host" && /\.local /.test(s) ? "host-mdns" : typ;
+  };
+  pc.addEventListener("icecandidate", (e) => e.candidate && d.sent.push(kind(e.candidate.candidate)));
+  const add = pc.addIceCandidate.bind(pc);
+  pc.addIceCandidate = async (c, ...rest) => {
+    d.recv.push(kind(c?.candidate));
+    try {
+      return await add(c, ...rest);
+    } catch (err) {
+      d.errors.push(`${err.name}: ${err.message}`);
+      console.warn("[net] addIceCandidate failed", err, c);
+      throw err;
+    }
+  };
+}
+function watchConn(conn, who) {
+  instrument(conn);
+  const other = who === "guest" ? "방장과" : "친구와";
+  conn.on("iceStateChanged", (s) => {
+    console.info(`[net] ${who} ${conn.label} ICE ${s}`);
+    if (!conn.open && conn.label === "ctl") ui.status(`${other} 직접 연결을 맞추는 중… (ICE ${s})`, "", who === "host" ? net.code : null);
+  });
+  conn.on("error", async (err) => {
+    const report = await iceReport(conn);
+    console.warn(`[net] ${who} ${conn.label} error ${err.type}: ${report}`);
+    if (conn.label === "ctl" && !net.ctl?.open) ui.status(`${other} 직접 연결하지 못했어요 (${err.type}). 진단: ${report}`, "warn", who === "host" ? net.code : null);
+  });
+}
+
 function hostRoom() {
   if (typeof Peer === "undefined") return ui.status("PeerJS를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.", "warn");
   leave(true);
-  const code = makeCode(), peer = new Peer(ROOM_PREFIX + code);
+  const code = makeCode(), peer = new Peer(ROOM_PREFIX + code, peerOptions());
   Object.assign(net, { peer, code });
-  ui.status("방 만드는 중…");
+  ui.status("PeerJS 서버에 접속하는 중…");
   ui.sync();
+  signalingTimeout(peer);
   peer.on("open", () => ui.status("친구에게 이 방 코드를 알려 주세요. 친구가 들어오길 기다리는 중…", "", code));
   peer.on("connection", (conn) => {
+    watchConn(conn, "host");
     if (conn.label === "state") return void (net.state = conn);
     if (net.ctl?.open) return void conn.on("open", () => (conn.send({ t: "full" }), setTimeout(() => conn.close(), 300)));
+    ui.status("친구가 들어오는 중…", "", code);
     net.ctl = conn;
+    setTimeout(async () => {
+      if (net.ctl !== conn || conn.open) return;
+      const report = await iceReport(conn);
+      console.warn(`[net] host: guest never connected: ${report}`);
+      net.ctl = null;
+      conn.close();
+      ui.status(`친구와 20초 동안 연결되지 않았어요. 진단: ${report}. 이 방 코드로 다시 들어올 수 있어요.`, "warn", code);
+    }, 22000);
     conn.on("open", () => {
       setMode("host");
       toTitle();
@@ -775,20 +876,52 @@ function hostRoom() {
   });
 }
 
+// Room codes are typed with the keyboard in Korean mode as often as not: "ADNZN" arrives as "뭉ㅋ누".
+// Turn every Hangul syllable or jamo back into the 2-beolsik keys that typed it, then keep A-Z and 0-9.
+const CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ", JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ";
+const JONG = ["", "ㄱ", "ㄲ", "ㄳ", "ㄴ", "ㄵ", "ㄶ", "ㄷ", "ㄹ", "ㄺ", "ㄻ", "ㄼ", "ㄽ", "ㄾ", "ㄿ", "ㅀ", "ㅁ", "ㅂ", "ㅄ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ"];
+const JAMO_KEYS = {
+  ㄱ: "r", ㄲ: "r", ㄴ: "s", ㄷ: "e", ㄸ: "e", ㄹ: "f", ㅁ: "a", ㅂ: "q", ㅃ: "q", ㅅ: "t", ㅆ: "t", ㅇ: "d", ㅈ: "w", ㅉ: "w",
+  ㅊ: "c", ㅋ: "z", ㅌ: "x", ㅍ: "v", ㅎ: "g", ㄳ: "rt", ㄵ: "sw", ㄶ: "sg", ㄺ: "fr", ㄻ: "fa", ㄼ: "fq", ㄽ: "ft", ㄾ: "fx", ㄿ: "fv", ㅀ: "fg", ㅄ: "qt",
+  ㅏ: "k", ㅐ: "o", ㅑ: "i", ㅒ: "o", ㅓ: "j", ㅔ: "p", ㅕ: "u", ㅖ: "p", ㅗ: "h", ㅘ: "hk", ㅙ: "ho", ㅚ: "hl", ㅛ: "y",
+  ㅜ: "n", ㅝ: "nj", ㅞ: "np", ㅟ: "nl", ㅠ: "b", ㅡ: "m", ㅢ: "ml", ㅣ: "l",
+};
+function roomCode(raw) {
+  let out = "";
+  for (const ch of raw) {
+    const s = ch.charCodeAt(0) - 0xac00;
+    if (s >= 0 && s < 11172) out += JAMO_KEYS[CHO[Math.floor(s / 588)]] + JAMO_KEYS[JUNG[Math.floor((s % 588) / 28)]] + (JAMO_KEYS[JONG[s % 28]] ?? "");
+    else out += JAMO_KEYS[ch] ?? ch;
+  }
+  return out.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+}
+
 function joinRoom(raw) {
   if (typeof Peer === "undefined") return ui.status("PeerJS를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.", "warn");
-  const code = raw.trim().toUpperCase();
+  const code = roomCode(raw);
   if (!/^[A-Z0-9]{5}$/.test(code)) return ui.status("방 코드는 5글자예요.", "warn");
   leave(true);
-  const peer = new Peer();
+  const peer = new Peer(peerOptions());
   Object.assign(net, { peer, code });
-  ui.status("방에 연결하는 중…");
+  ui.status("PeerJS 서버에 접속하는 중…");
   ui.sync();
+  signalingTimeout(peer);
   peer.on("open", () => {
+    ui.status("방장을 찾는 중…");
     const id = ROOM_PREFIX + code;
     const ctl = peer.connect(id, { label: "ctl", reliable: true, serialization: "json" });
     const st = peer.connect(id, { label: "state", reliable: false, serialization: "json" });
     Object.assign(net, { ctl, state: st });
+    watchConn(ctl, "guest");
+    watchConn(st, "guest");
+    // ICE can sit in "checking" for a long time without ever reporting failure: give up after 20 s and say why
+    setTimeout(async () => {
+      if (net.peer !== peer || ctl.open) return;
+      const report = await iceReport(ctl);
+      console.warn(`[net] guest timeout: ${report}`);
+      leave(true);
+      ui.status(`20초 동안 연결되지 않았어요. 진단: ${report}`, "warn");
+    }, 20000);
     ctl.on("open", () => {
       held.clear();
       effects.length = 0;
@@ -876,8 +1009,26 @@ const ui = (() => {
   if (!el.host) return { status() {}, sync() {}, ping() {} };
   el.host.onclick = () => hostRoom();
   el.join.onclick = () => joinRoom(el.code.value);
-  el.code.onkeydown = (e) => e.key === "Enter" && joinRoom(el.code.value);
-  el.code.oninput = () => (el.code.value = el.code.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5));
+  // The field is read-only so no IME ever composes in it (the Korean IME would hold its own copy of the
+  // text and fight every edit). Instead we read the physical key (e.code), which is the same in any layout.
+  el.code.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey) {
+      if (e.code === "Backspace") (e.preventDefault(), (el.code.value = ""));
+      return; // let Cmd/Ctrl+V reach the paste handler
+    }
+    const m = /^(?:Key([A-Z])|Digit(\d)|Numpad(\d))$/.exec(e.code);
+    if (m) (e.preventDefault(), (el.code.value = (el.code.value + (m[1] ?? m[2] ?? m[3])).slice(0, 5)));
+    else if (e.code === "Backspace") (e.preventDefault(), (el.code.value = el.code.value.slice(0, -1)));
+    else if (e.code === "Delete" || e.code === "Escape") (e.preventDefault(), (el.code.value = ""));
+    else if (e.code === "Enter" || e.code === "NumpadEnter") (e.preventDefault(), joinRoom(el.code.value));
+  });
+  // pasting a code (even one copied as Hangul) works too
+  const paste = (e) => {
+    if (document.activeElement !== el.code || el.code.disabled) return;
+    e.preventDefault();
+    el.code.value = roomCode(e.clipboardData?.getData("text") ?? "");
+  };
+  document.addEventListener("paste", paste);
   el.leave.onclick = () => leave();
   return {
     status(text, kind = "", code = null) {
@@ -949,4 +1100,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport,renderOnce: () => (render(), composite(frame, img.data, BG)) };
