@@ -758,15 +758,49 @@ function onCtl(d) {
   }
 }
 
-// ICE servers. PeerJS's own defaults (Google STUN + PeerJS TURN). Add "?relay=1" to the address to force every
-// connection through TURN, which is how to test what happens when a direct connection is impossible.
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
-  { urls: ["turn:eu-0.turn.peerjs.com:3478", "turn:us-0.turn.peerjs.com:3478"], username: "peerjs", credential: "peerjsp" },
-];
-function peerOptions() {
+// ICE servers: Google STUN always (free: it only tells each browser its public address), plus Cloudflare TURN
+// relays fetched from our own /api/turn function (api/turn.js on Vercel). The browser tries a direct connection
+// first, then STUN, and only relays through TURN when both fail, so TURN traffic is used only when it must be.
+// Add "?relay=1" to the address to force TURN, which is how to test the relay path.
+const STUN_SERVERS = [{ urls: "stun:stun.l.google.com:19302" }];
+let turnCache = { servers: null, until: 0 };
+async function turnServers() {
+  if (turnCache.servers && performance.now() < turnCache.until) return turnCache.servers;
+  try {
+    const r = await fetch("/api/turn", { signal: AbortSignal.timeout(4000), cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const { iceServers } = await r.json();
+    turnCache = { servers: iceServers, until: performance.now() + 5 * 3600e3 }; // credentials last 6 h
+    return iceServers;
+  } catch (err) {
+    console.info("[net] no TURN relay available (STUN only):", err.message ?? err);
+    return [];
+  }
+}
+async function peerOptions() {
   const relayOnly = new URLSearchParams(location.search).has("relay");
-  return { debug: 1, config: { iceServers: ICE_SERVERS, ...(relayOnly ? { iceTransportPolicy: "relay" } : {}) } };
+  const turn = await turnServers();
+  net.hasTurn = turn.length > 0;
+  return { debug: 1, config: { iceServers: [...STUN_SERVERS, ...turn], ...(relayOnly ? { iceTransportPolicy: "relay" } : {}) } };
+}
+// once connected: which route did ICE pick? (shown next to the status so you can tell when TURN is in use)
+async function routeOf(conn) {
+  try {
+    const stats = await conn.peerConnection.getStats();
+    let pair = null;
+    stats.forEach((s) => s.type === "transport" && s.selectedCandidatePairId && (pair = stats.get(s.selectedCandidatePairId)));
+    if (!pair) stats.forEach((s) => s.type === "candidate-pair" && s.state === "succeeded" && s.nominated && (pair = s));
+    const types = [stats.get(pair?.localCandidateId)?.candidateType, stats.get(pair?.remoteCandidateId)?.candidateType];
+    if (types.includes("relay")) return "TURN 중계";
+    if (types.includes("srflx") || types.includes("prflx")) return "인터넷 직접 연결(STUN)";
+    if (types.includes("host")) return "같은 네트워크 직접 연결";
+  } catch {}
+  return "알 수 없음";
+}
+async function showRoute(conn, text, code) {
+  ui.status(`${text} · 연결 방식: 확인 중…`, "ok", code);
+  const route = await routeOf(conn);
+  if (net.ctl === conn && conn.open) ui.status(`${text} · 연결 방식: ${route}`, "ok", code);
 }
 
 // The usual cause on a Mac: the browser lacks macOS's Local Network permission, so it cannot resolve the other
@@ -837,19 +871,24 @@ function watchConn(conn, who) {
   const other = who === "guest" ? "방장과" : "친구와";
   conn.on("iceStateChanged", (s) => {
     console.info(`[net] ${who} ${conn.label} ICE ${s}`);
-    if (!conn.open && conn.label === "ctl") ui.status(`${other} 직접 연결을 맞추는 중… (ICE ${s})`, "", who === "host" ? net.code : null);
+    if (!conn.open && conn.label === "ctl") ui.status(`${other} 연결을 맞추는 중… (ICE ${s})`, "", who === "host" ? net.code : null);
   });
   conn.on("error", async (err) => {
     const report = await iceReport(conn);
     console.warn(`[net] ${who} ${conn.label} error ${err.type}: ${report}`);
-    if (conn.label === "ctl" && !net.ctl?.open) ui.status(`${other} 직접 연결하지 못했어요 (${err.type}). ${NET_HINT} 진단: ${report}`, "warn", who === "host" ? net.code : null);
+    if (conn.label === "ctl" && !net.ctl?.open) ui.status(`${other} 연결하지 못했어요 (${err.type}). ${NET_HINT} 진단: ${report} · TURN ${net.hasTurn ? "있음" : "없음"}`, "warn", who === "host" ? net.code : null);
   });
 }
 
-function hostRoom() {
+async function hostRoom() {
   if (typeof Peer === "undefined") return ui.status("PeerJS를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.", "warn");
+  if (net.starting) return;
   leave(true);
-  const code = makeCode(), peer = new Peer(ROOM_PREFIX + code, peerOptions());
+  ui.status("연결 준비 중…");
+  net.starting = true;
+  ui.sync();
+  const options = await peerOptions().finally(() => (net.starting = false));
+  const code = makeCode(), peer = new Peer(ROOM_PREFIX + code, options);
   Object.assign(net, { peer, code });
   ui.status("PeerJS 서버에 접속하는 중…");
   ui.sync();
@@ -867,13 +906,13 @@ function hostRoom() {
       console.warn(`[net] host: guest never connected: ${report}`);
       net.ctl = null;
       conn.close();
-      ui.status(`친구와 20초 동안 연결되지 않았어요. 이 방 코드로 다시 들어올 수 있어요. ${NET_HINT} 진단: ${report}`, "warn", code);
+      ui.status(`친구와 20초 동안 연결되지 않았어요. 이 방 코드로 다시 들어올 수 있어요. ${NET_HINT} 진단: ${report} · TURN ${net.hasTurn ? "있음" : "없음"}`, "warn", code);
     }, 22000);
     conn.on("open", () => {
       setMode("host");
       toTitle();
       startPinging();
-      ui.status("친구와 연결됐어요! 나는 1P(방장)예요. Enter를 누르면 시작해요.", "ok", code);
+      showRoute(conn, "친구와 연결됐어요! 나는 1P(방장)예요. Enter를 누르면 시작해요", code);
     });
     conn.on("data", onCtl);
     conn.on("close", onDisconnect);
@@ -905,12 +944,16 @@ function roomCode(raw) {
   return out.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
 }
 
-function joinRoom(raw) {
+async function joinRoom(raw) {
   if (typeof Peer === "undefined") return ui.status("PeerJS를 불러오지 못했어요. 인터넷 연결을 확인해 주세요.", "warn");
   const code = roomCode(raw);
   if (!/^[A-Z0-9]{5}$/.test(code)) return ui.status("방 코드는 5글자예요.", "warn");
+  if (net.starting) return;
   leave(true);
-  const peer = new Peer(peerOptions());
+  ui.status("연결 준비 중…");
+  net.starting = true;
+  ui.sync();
+  const peer = new Peer(await peerOptions().finally(() => (net.starting = false)));
   Object.assign(net, { peer, code });
   ui.status("PeerJS 서버에 접속하는 중…");
   ui.sync();
@@ -929,7 +972,7 @@ function joinRoom(raw) {
       const report = await iceReport(ctl);
       console.warn(`[net] guest timeout: ${report}`);
       leave(true);
-      ui.status(`20초 동안 연결되지 않았어요. ${NET_HINT} 진단: ${report}`, "warn");
+      ui.status(`20초 동안 연결되지 않았어요. ${NET_HINT} 진단: ${report} · TURN ${net.hasTurn ? "있음" : "없음"}`, "warn");
     }, 20000);
     ctl.on("open", () => {
       held.clear();
@@ -937,7 +980,7 @@ function joinRoom(raw) {
       fxById.clear();
       setMode("guest");
       startPinging();
-      ui.status("연결됐어요! 나는 2P예요. 방장이나 내가 Enter를 누르면 시작해요.", "ok", code);
+      showRoute(ctl, "연결됐어요! 나는 2P예요. 방장이나 내가 Enter를 누르면 시작해요", code);
     });
     ctl.on("data", onCtl);
     ctl.on("close", onDisconnect);
@@ -1051,7 +1094,7 @@ const ui = (() => {
       el.ping.textContent = `핑 ${ms}ms`;
     },
     sync() {
-      const busy = !!net.peer;
+      const busy = !!net.peer || !!net.starting;
       el.leave.hidden = !busy;
       el.host.disabled = el.join.disabled = busy;
       el.code.disabled = busy;
@@ -1109,4 +1152,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport,renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, renderOnce: () => (render(), composite(frame, img.data, BG)) };
