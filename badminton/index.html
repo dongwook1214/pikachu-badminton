@@ -60,6 +60,10 @@
     font: 700 22px/1 ui-monospace, monospace; letter-spacing: 0.2em; color: #ffd23c; background: #24213a;
     border-radius: 6px; padding: 6px 10px; user-select: all;
   }
+  .seg { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+  .seg button { background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; }
+  .seg button:hover:not(:disabled) { background: #2e2a4a; }
+  .seg button[aria-pressed="true"] { background: #ffd23c; color: #1a1408; border-color: #ffd23c; }
   #net-status[data-kind="ok"] { color: #9dff9a; }
   #net-status[data-kind="warn"] { color: #ff8a7a; }
 
@@ -179,6 +183,18 @@
     <button data-key="KeyH" class="dash">전광<br>석화</button>
     <button data-key="KeyF" class="hit">공격</button>
   </div>
+</div>
+<div class="card online" id="mode-card">
+  <div class="row">
+    <strong>혼자 하기</strong>
+    <span class="seg" role="group" aria-label="상대 고르기">
+      <button data-ai="easy">AI 쉬움</button>
+      <button data-ai="normal">AI 보통</button>
+      <button data-ai="hard">AI 어려움</button>
+      <button data-ai="">둘이서 (한 기기)</button>
+    </span>
+  </div>
+  <div class="row status-row"><span id="mode-status" class="muted"></span></div>
 </div>
 <div class="card online">
   <div class="row">

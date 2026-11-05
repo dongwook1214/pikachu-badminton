@@ -29,28 +29,33 @@ const C = (h) => hex(h);
 const VOLT = fit(PAL.volt, 8);
 const WHITE = C("#ffffff"), INK = C("#0b0a12");
 
-// ---------------------------------------------------------------- the Pikachu sprite (pikachu_grid.json, made by art/pikachu_pixel.py)
-const grid = await fetch("./pikachu_grid.json").then((r) => r.json());
-let gx0 = 1e9, gx1 = -1, gy0 = 1e9, gy1 = -1;
-grid.rows.forEach((r, y) => [...r].forEach((ch, x) => {
-  if (ch !== ".") (gx0 = Math.min(gx0, x), gx1 = Math.max(gx1, x), gy0 = Math.min(gy0, y), gy1 = Math.max(gy1, y));
-}));
-const ROWS = grid.rows.slice(gy0, gy1 + 1).map((r) => r.slice(gx0, gx1 + 1));
-const SW = ROWS[0].length, SH = ROWS.length;
-const AX = -(grid.center_x - gx0), AY = -SH;
-const ACTOR = (() => {
-  const mask = { w: SW, h: SH, data: new Uint8Array(SW * SH) }, pixels = new Uint32Array(SW * SH);
-  ROWS.forEach((r, y) => [...r].forEach((ch, x) => {
-    if (ch === ".") return;
-    mask.data[y * SW + x] = 1;
-    pixels[y * SW + x] = C(grid.palette[ch]);
+// ---------------------------------------------------------------- sprites
+// players: pikachu_grid.json (art/pikachu_pixel.py); the CPU opponent: cpu_grid.json (art/cpu_pixel.py, original)
+// A sprite: trimmed rows, its palette, the offset that puts its feet at (0, 0), and a pixelfx actor (mask +
+// pixels) for the effects that wrap a body (electrified, stunned).
+function makeSprite(g) {
+  let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
+  g.rows.forEach((r, y) => [...r].forEach((ch, x) => {
+    if (ch !== ".") (x0 = Math.min(x0, x), x1 = Math.max(x1, x), y0 = Math.min(y0, y), y1 = Math.max(y1, y));
   }));
-  return { mask, pixels, x: AX, y: AY, w: SW, h: SH, k: 2, head: [0, AY], chest: [0, Math.round(AY * 0.55)] };
-})();
-const PAL1 = { ...grid.palette };
-const PAL2 = { ...grid.palette, Y: "#ffc23a", t: "#ffc23a", O: "#dc8c14" };
+  const rows = g.rows.slice(y0, y1 + 1).map((r) => r.slice(x0, x1 + 1));
+  const w = rows[0].length, h = rows.length, ax = -(g.center_x - x0), ay = -h;
+  const mask = { w, h, data: new Uint8Array(w * h) }, pixels = new Uint32Array(w * h);
+  rows.forEach((r, y) => [...r].forEach((ch, x) => {
+    if (ch === ".") return;
+    mask.data[y * w + x] = 1;
+    pixels[y * w + x] = C(g.palette[ch]);
+  }));
+  const actor = { mask, pixels, x: ax, y: ay, w, h, k: 2, head: [0, ay], chest: [0, Math.round(ay * 0.55)] };
+  return { rows, pal: { ...g.palette }, ax, ay, actor };
+}
+const [pikaGrid, cpuGrid] = await Promise.all(["./pikachu_grid.json", "./cpu_grid.json"].map((u) => fetch(u).then((r) => r.json())));
+const SPR_P1 = makeSprite(pikaGrid);
+const SPR_P2 = { ...SPR_P1, pal: { ...SPR_P1.pal, Y: "#ffc23a", t: "#ffc23a", O: "#dc8c14" } };
+const SPR_CPU = makeSprite(cpuGrid);
+const ACTOR = SPR_P1.actor; // online play only uses the player sprite
 const STEEL = { t: "#d6deee", k: "#2c3246", B: "#8890a6" };
-const CHEEK_ZAP = { R: "#fff7a8" };
+const CHEEK_ZAP = { R: "#fff7a8", P: "#e8f6ff" };
 const AFTER = { 1: ["#fff3a0", "#d8a030", "#6a4a20"].map(C), 2: ["#ffe08a", "#d08a28", "#64401c"].map(C) };
 
 // ---------------------------------------------------------------- input
@@ -95,7 +100,7 @@ const anyPressed = (codes) => codes.some((c) => LOCAL.pressed.has(c) || (net.mod
 
 // ---------------------------------------------------------------- state
 const makePlayer = (id) => ({
-  id, ctl: CONTROLS[id], src: LOCAL, pal: id === 1 ? PAL1 : PAL2, tag: C(id === 1 ? "#ff6b5b" : "#5bb0ff"),
+  id, ctl: CONTROLS[id], src: LOCAL, spr: id === 1 ? SPR_P1 : SPR_P2, tag: C(id === 1 ? "#ff6b5b" : "#5bb0ff"),
   x: 0, y: FLOOR, vx: 0, vy: 0, face: id === 1 ? 1 : -1, ground: true,
   act: null, cd: { zap: 0, tail: 0, quick: 0 }, quickT: 0, quickDir: null,
   stun: 0, stunKind: null, knocked: false, knockT: 0, iframes: 0, statusFx: null,
@@ -190,7 +195,7 @@ function stunPlayer(o, kind, from) {
     o.stun = STUN.zap;
     o.vx = 0;
     if (!o.ground) o.vy = Math.max(o.vy, 0);
-    o.statusFx = spawn(electrified, { x: o.x, y: o.y, actor: ACTOR, palette: PAL.volt, sparks: ["#ffffff", "#fff6c4", "#ffe066", "#f0b424"] }, { follow: o });
+    o.statusFx = spawn(electrified, { x: o.x, y: o.y, actor: o.spr.actor, palette: PAL.volt, sparks: ["#ffffff", "#fff6c4", "#ffe066", "#f0b424"] }, { follow: o });
   } else if (kind === "tail") {
     // knocked flying first; the 0.5 s stun starts on landing
     o.knocked = true;
@@ -329,7 +334,7 @@ function updatePlayer(p, dt) {
     p.stunKind = "tail";
     puff(p.x, FLOOR, 7);
     clearStatus(p);
-    p.statusFx = spawn(stunnedFx, { x: p.x, y: p.y, actor: ACTOR }, { follow: p });
+    p.statusFx = spawn(stunnedFx, { x: p.x, y: p.y, actor: p.spr.actor }, { follow: p });
   }
 
   // after-images while dashing
@@ -449,6 +454,137 @@ function updateBolts(dt) {
 }
 
 // ---------------------------------------------------------------- step
+// ---------------------------------------------------------------- AI opponent (plays 2P)
+// It presses 2P's keys through its own input source, like a third keyboard, so it follows every rule a person
+// does (cooldowns, stuns, the serve line). It reads the shuttle with the same physics the game runs.
+const AI_SRC = { held: new Set(), pressed: new Set() };
+const AI_LEVELS = {
+  easy: { name: "EASY", react: 0.4, aimErr: 22, miss: 0.25, smash: 0.12, zap: 0.05, dash: false, dodge: 0.15, serveWait: [1.4, 2.2] },
+  normal: { name: "NORMAL", react: 0.2, aimErr: 9, miss: 0.08, smash: 0.45, zap: 0.15, dash: true, dodge: 0.5, serveWait: [0.9, 1.6] },
+  hard: { name: "HARD", react: 0.07, aimErr: 3, miss: 0, smash: 0.85, zap: 0.3, dash: true, dodge: 0.9, serveWait: [0.5, 1.0] },
+};
+const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, dodged: new Set() };
+const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
+const rand = (a, b) => a + Math.random() * (b - a);
+
+function setAI(level) {
+  ai.on = !!level;
+  if (level) ai.level = level;
+  P2.spr = ai.on ? SPR_CPU : SPR_P2;
+  AI_SRC.held.clear();
+  AI_SRC.pressed.clear();
+  if (ai.on) (P1.ctl = ANY), (P1.src = LOCAL), (P2.ctl = CONTROLS[2]), (P2.src = AI_SRC);
+  else if (net.mode === "local") (P1.ctl = CONTROLS[1]), (P2.ctl = CONTROLS[2]), (P1.src = P2.src = LOCAL);
+}
+
+// where the shuttle will be, frame by frame, until it lands (same integrator and net as updateShuttle)
+function predictShuttle(maxT = 2.5) {
+  const out = [], h = DT / 4;
+  let x = S.x, y = S.y, vx = S.vx, vy = S.vy;
+  for (let t = DT; t <= maxT; t += DT) {
+    for (let k = 0; k < 4; k++) {
+      const v = Math.hypot(vx, vy);
+      vx += -SH_K * v * vx * h;
+      vy += (SH_G - SH_K * v * vy) * h;
+      const px = x;
+      x += vx * h;
+      y += vy * h;
+      if ((px - NET_X) * (x - NET_X) <= 0 && px !== x && y > NET_TOP && y < NET_BOTTOM) (x = px), (vx = -vx * 0.15), (vy = Math.max(vy, 0) * 0.4);
+      if (y >= FLOOR) return out.push({ t, x, y: FLOOR, vy, land: true }), out;
+    }
+    out.push({ t, x, y, vy });
+  }
+  return out;
+}
+
+// pick the point to meet the shuttle: a jump smash if it comes high enough (and we feel like it), else a ground hit
+function aiPlan(me) {
+  const path = predictShuttle(), mine = (s) => (me === P2 ? s.x > NET_X + 8 : s.x < NET_X - 8);
+  const reach = (s) => Math.abs(s.x - me.face * 12 - me.x) <= RUN * s.t + (AI_LEVELS[ai.level].dash && me.cd.quick <= 0 ? 70 : 0) + 14;
+  if (ai.wantSmash) {
+    const high = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 82 && s.y < FLOOR - 52 && reach(s));
+    if (high) return { ...high, smash: true };
+  }
+  const low = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32 && reach(s)) ?? path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32);
+  return low ? { ...low, smash: false } : null;
+}
+
+function aiStep() {
+  const me = P2, op = P1, L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
+  const held = AI_SRC.held, press = (a) => AI_SRC.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
+  AI_SRC.pressed.clear();
+  held.clear();
+  if (game.state === "title" || game.state === "over" || game.paused || me.stun > 0 || me.knocked) return;
+  const fwd = me.face > 0 ? "right" : "left", back = me.face > 0 ? "left" : "right";
+  const home = me === P2 ? 290 : 94;
+
+  // a shot is out: keep its direction key down until the swing is over
+  if (now < ai.shotUntil) ai.shotKeys.forEach(hold);
+  const chooseShot = (serve) => {
+    const r = Math.random(), opNearNet = Math.abs(op.x - NET_X) < 60, opDeep = Math.abs(op.x - NET_X) > 130;
+    ai.shotKeys = serve ? (r < 0.6 ? [] : r < 0.8 ? [back] : ["down"])
+      : opNearNet ? (r < 0.6 ? [] : [back])
+      : opDeep ? (r < 0.5 ? ["down"] : r < 0.8 ? [fwd] : [])
+      : [[], [fwd], [back], ["down"]][(r * 4) | 0];
+    ai.shotUntil = now + 0.22;
+  };
+
+  // serving: wait a moment, then hit it
+  if (game.state === "serve") {
+    ai.plan = null;
+    ai.lastBy = null;
+    if (game.server !== me) return void (Math.abs(home - me.x) > 4 && hold(home > me.x ? "right" : "left"));
+    if (!ai.serveAt) ai.serveAt = now + rand(...L.serveWait);
+    if (now >= ai.serveAt && !me.act) (chooseShot(true), ai.shotKeys.forEach(hold), press("basic"), (ai.serveAt = 0));
+    return;
+  }
+  ai.serveAt = 0;
+  if (S.state !== "fly") return void (Math.abs(home - me.x) > 4 && hold(home > me.x ? "right" : "left"));
+
+  // someone just hit it: take a moment to react, then decide how to meet it
+  if (S.last !== ai.lastBy) {
+    ai.lastBy = S.last;
+    ai.plan = null;
+    ai.reactAt = now + (S.last === op ? L.react : 0);
+    ai.err = rand(-L.aimErr, L.aimErr);
+    ai.skip = S.last === op && Math.random() < L.miss;
+    ai.wantSmash = Math.random() < L.smash;
+  }
+  let target = home;
+  if (S.last === op && now >= ai.reactAt) {
+    if (!ai.plan || now >= ai.replanAt) (ai.plan = aiPlan(me)), (ai.plan && (ai.plan.at = now)), (ai.replanAt = now + 0.15);
+    if (ai.plan) target = clamp(ai.plan.x - me.face * 12 + ai.err, me === P2 ? NET_X + 10 : 12, me === P2 ? W - 12 : NET_X - 10);
+  }
+  const dx = target - me.x, left = ai.plan ? ai.plan.t - (now - ai.plan.at) : 9;
+  if (Math.abs(dx) > 3) hold(dx > 0 ? "right" : "left");
+  // far and running out of time: Quick Attack towards it
+  if (L.dash && ai.plan && Math.abs(dx) > 55 && left < Math.abs(dx) / RUN && me.cd.quick <= 0 && me.quickT <= 0) press("quick");
+  // a high one: jump so the swing meets it at the top (the swing then becomes Iron Tail)
+  if (ai.plan?.smash && me.ground && Math.abs(dx) < 16 && left < 0.32 && left > 0.12) press("up");
+
+  // swing when the shuttle is in reach
+  const hx = me.x + me.face * 12, hy = me.y - 18;
+  if (!ai.skip && !me.act && S.last !== me && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS * 0.95) {
+    if (me.ground) chooseShot(false);
+    else (ai.shotKeys = []), (ai.shotUntil = 0);
+    ai.shotKeys.forEach(hold);
+    press("basic");
+  }
+
+  // zap the other player now and then, when nothing more urgent is going on
+  if (me.cd.zap <= 0 && !me.act && me.ground && op.ground && Math.abs(op.x - me.x) > 50 && left > 0.8 && Math.random() < L.zap * DT) press("zap");
+  // a bolt coming our way: hop over it
+  for (const b of bolts) {
+    if (b.owner === me || ai.dodged.has(b.seed)) continue;
+    const gap = (me.x - b.x) * Math.sign(b.vx);
+    if (gap > 0 && gap < 70 && me.ground) {
+      ai.dodged.add(b.seed);
+      if (Math.random() < L.dodge) press("up");
+    }
+  }
+  if (ai.dodged.size > 50) ai.dodged.clear();
+}
+
 function step(dt) {
   if (game.hold) return; // debug: freeze the world for screenshots
   game.time += dt;
@@ -463,6 +599,7 @@ function step(dt) {
     return;
   }
 
+  if (ai.on) aiStep();
   for (const p of PLAYERS) updatePlayer(p, dt);
   updateShuttle(dt);
   updateBolts(dt);
@@ -524,7 +661,8 @@ function drawNet(p) {
 }
 
 function drawPlayer(p, P) {
-  let flip = p.face > 0, pal = p.pal, ox = 0, oy = 0, tint;
+  const spr = p.spr;
+  let flip = p.face > 0, pal = spr.pal, ox = 0, oy = 0, tint;
   const a = p.act;
   if (a?.type === "tail") {
     if (a.t < TAIL.on) ox = -p.face * 2;
@@ -544,7 +682,7 @@ function drawPlayer(p, P) {
   for (let i = 0; i < p.trail.length; i += 2) {
     const g = p.trail[i], step = g.a > 0.55 ? 0 : g.a > 0.3 ? 1 : 2;
     P.place(Math.round(g.x), Math.round(g.y), g.flip);
-    P.sprite(ROWS, pal, AX, AY, { tint: AFTER[p.id][step] });
+    P.sprite(spr.rows, pal, spr.ax, spr.ay, { tint: AFTER[p.id][step] });
   }
   if (p.quickT > 0 && p.quickDir !== "up") {
     P.place(0, 0);
@@ -554,7 +692,7 @@ function drawPlayer(p, P) {
     }
   }
   P.place(Math.round(p.x + ox), Math.round(p.y + oy), flip);
-  if (!blinkOff) P.sprite(ROWS, pal, AX, AY, { tint });
+  if (!blinkOff) P.sprite(spr.rows, pal, spr.ax, spr.ay, { tint });
 
   // cheeks spark while charging a zap
   if (a?.type === "zap") {
@@ -576,8 +714,8 @@ function drawPlayer(p, P) {
   }
   // player tag (online: mark which one is you)
   P.place(0, 0);
-  P.text(`${p.id}P`, Math.round(p.x), Math.round(p.y + AY - 9), p.tag, { align: "center", outline: INK });
-  if (net.mode !== "local" && p.id === myId()) P.text("YOU", Math.round(p.x), Math.round(p.y + AY - 16), WHITE, { align: "center", outline: INK });
+  P.text(tagOf(p), Math.round(p.x), Math.round(p.y + spr.ay - 9), p.tag, { align: "center", outline: INK });
+  if (net.mode !== "local" && p.id === myId()) P.text("YOU", Math.round(p.x), Math.round(p.y + spr.ay - 16), WHITE, { align: "center", outline: INK });
 }
 
 function drawShuttle(P) {
@@ -627,7 +765,7 @@ function drawHud(P) {
   const skills = [["ZAP", "zap", ZAP.cd], ["DASH", "quick", QUICK.cd]];
   for (const p of PLAYERS) {
     const left = p === P1, x0 = left ? 8 : W - 8 - skills.length * 30 + 6;
-    P.text(`${p.id}P`, left ? 8 : W - 8, 9, p.tag, { font: "big", align: left ? "left" : "right", outline: INK });
+    P.text(tagOf(p), left ? 8 : W - 8, 9, p.tag, { font: "big", align: left ? "left" : "right", outline: INK });
     skills.forEach(([label, key, cd], i) => {
       const x = x0 + i * 30, y = 20, ready = p.cd[key] <= 0, k = 1 - p.cd[key] / cd;
       P.text(label, x, y, ready ? C("#fff3a0") : C("#6c6888"), { outline: INK });
@@ -637,7 +775,7 @@ function drawHud(P) {
   }
   if (game.state === "serve") {
     const s = game.server;
-    if (Math.floor(game.time * 3) % 2) P.text("HIT TO SERVE", Math.round(s.x), Math.round(s.y + AY - 22), C("#ffffff"), { align: "center", outline: INK });
+    if (Math.floor(game.time * 3) % 2) P.text("HIT TO SERVE", Math.round(s.x), Math.round(s.y + s.spr.ay - 22), C("#ffffff"), { align: "center", outline: INK });
   }
   for (const m of marks) {
     const a = clamp(1.6 - m.t);
@@ -660,6 +798,7 @@ function drawOverlay(P) {
     P.glow(W / 2, 70, 90, VOLT[4], 0.15);
     if (Math.floor(game.time * 2) % 2) P.text("PRESS ENTER", W / 2, 128, C("#fff3a0"), { font: "big", align: "center", outline: INK });
     P.text(`FIRST TO ${WIN}`, W / 2, 144, C("#9a96b0"), { align: "center", outline: INK });
+    if (ai.on) P.text(`VS CPU - ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
     if (net.mode !== "local") P.text(`ONLINE - YOU ARE ${myId()}P`, W / 2, 168, C("#ffffff"), { align: "center", outline: INK });
   } else if (game.state === "over") {
     P.rect(W / 2 - 90, 58, 180, 70, INK);
@@ -703,6 +842,9 @@ function setMode(mode) {
   REMOTE.pressed.clear();
   if (mode === "local") (P1.ctl = CONTROLS[1]), (P2.ctl = CONTROLS[2]), (P1.src = P2.src = LOCAL);
   else (P1.ctl = P2.ctl = ANY), (P1.src = LOCAL), (P2.src = REMOTE);
+  // the AI only plays offline: going online sends it home, coming back brings it back if it was on
+  if (mode !== "local") (P2.spr = SPR_P2), (ai.wasOn = ai.wasOn || ai.on), (ai.on = false);
+  else if (ai.wasOn) (ai.wasOn = false), setAI(ai.level);
   ui.sync();
 }
 function toTitle() {
@@ -1288,8 +1430,35 @@ const ui = (() => {
       el.leave.hidden = !busy;
       el.host.disabled = el.join.disabled = busy;
       el.code.disabled = busy;
+      this.onMode?.();
     },
   };
+})();
+
+// ---- choosing the opponent: the AI at one of three levels, or two people on one device
+(() => {
+  const buttons = [...document.querySelectorAll("[data-ai]")], status = document.getElementById("mode-status");
+  if (!buttons.length) return;
+  const show = () => {
+    const level = net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null;
+    for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
+    status.textContent =
+      net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
+      : ai.on ? `AI(${{ easy: "쉬움", normal: "보통", hard: "어려움" }[ai.level]})와 대전해요. 나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`
+      : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
+  };
+  for (const b of buttons)
+    b.onclick = () => {
+      if (net.peer) leave(true); // leaving an online room to play here
+      setAI(b.dataset.ai || null);
+      toTitle();
+      show();
+      b.blur(); // so Enter/Space go to the game, not back to this button
+    };
+  // a phone has one player: start against the AI
+  if (TOUCH) setAI("normal");
+  show();
+  ui.onMode = show; // online state changes refresh it too
 })();
 
 // ---------------------------------------------------------------- main loop
@@ -1342,4 +1511,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType,renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, renderOnce: () => (render(), composite(frame, img.data, BG)) };

@@ -1,0 +1,41 @@
+{
+ "rows": [
+  "............KKKKKKKK..............",
+  "...........KCCCCCCCCK.............",
+  "..........KCCCWWCCCCCK............",
+  ".........KCCCWCCCCCCCCK...........",
+  "......KKKCCCCCCCCCCCCCCK..........",
+  "....KKCCCCCCCCCCCCCCCCCK..........",
+  "...KCCCCWCCCCCCCCCCCCCCKK....kkkkk",
+  "...KCCCWCCCCCCCCCCCCCCCCCK..kttttk",
+  "..KCCCCCCCCCCCCCCCCCCCCCCCKktttk..",
+  "..KCCCCCCCCCCCCCCCCCCCCCCCCKtttkk.",
+  "..KCCCCCCCWWWCCCCCWWWCCCCCCKkttk..",
+  "..KCCCCCCCWWWCCCCCWWWCCCCCCKkttk..",
+  ".KCCCCCCCCWEECCCCCEEWCCCCCCKttk...",
+  ".KCCCCCCCCWEWCCCCCWEWCCCCCCKtk....",
+  "KCCCCCCPPCCCCCCCCCCCCPPCCCCK......",
+  "KCCCCCCCCCCCCKCCKCCCCCCCCCCK......",
+  "KCCCCCCCCCCCCCKKCCCCCCCCCCCK......",
+  "KDMMMMMMMMMMMMMMMMMMMMMMMMMK......",
+  ".KMMMMMMMMMMMMMMMMMMMMMMMMDK......",
+  ".KDMMMMMMMMMMMMMMMMMMMMMMMK.......",
+  "..KDDMMMMDMMMMMMMMMMMMMMDDK.......",
+  "...KKDDDDKDDDDDDDDDDDDDDKK........",
+  ".....KKKK.KDDDDDDDDKKKKK..........",
+  "........KFFFKKKKKKFFFK............"
+ ],
+ "palette": {
+  "K": "#26283f",
+  "C": "#d5dcef",
+  "M": "#9aa5c8",
+  "D": "#6c769c",
+  "W": "#ffffff",
+  "E": "#1a1b2e",
+  "P": "#7fb8ff",
+  "F": "#3b3f63",
+  "t": "#ffd640",
+  "k": "#3c2a14"
+ },
+ "center_x": 15
+}
