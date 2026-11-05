@@ -724,7 +724,7 @@ function makeCode() {
 function leave(silent) {
   clearInterval(net.pinger);
   try { net.ctl?.close(); net.state?.close(); net.peer?.destroy(); } catch {}
-  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1 });
+  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1, route: null, peerNat: null, connText: null });
   const wasOnline = net.mode !== "local";
   setMode("local");
   if (wasOnline) toTitle();
@@ -757,6 +757,9 @@ function onCtl(d) {
     const e = { fx: createFx(mod, o), id: d.id };
     effects.push(e);
     fxById.set(d.id, e);
+  } else if (d.t === "nat") {
+    net.peerNat = String(d.v).slice(0, 60);
+    refreshConn();
   } else if (d.t === "full") {
     leave(true);
     ui.status("그 방은 이미 두 명이 차 있어요.", "warn");
@@ -802,10 +805,76 @@ async function routeOf(conn) {
   } catch {}
   return "알 수 없음";
 }
+// ICE starts on whichever pair answers first (often TURN, which is ready early) and may move to a better one
+// a few seconds later, so the route is checked again for a while instead of only once.
 async function showRoute(conn, text, code) {
-  ui.status(`${text} · 연결 방식: 확인 중…`, "ok", code);
-  const route = await routeOf(conn);
-  if (net.ctl === conn && conn.open) ui.status(`${text} · 연결 방식: ${route}`, "ok", code);
+  Object.assign(net, { route: null, myNat: null, peerNat: null, connText: text, connCode: code });
+  refreshConn(conn);
+  for (const wait of [0, 2000, 5000, 10000, 20000]) {
+    setTimeout(async () => {
+      if (net.ctl !== conn || !conn.open) return;
+      const route = await routeOf(conn);
+      if (net.route && net.route !== route) console.info(`[net] route changed: ${net.route} -> ${route}`);
+      net.route = route;
+      refreshConn(conn);
+    }, wait);
+  }
+  natType().then((nat) => {
+    net.myNat = nat;
+    sendCtl({ t: "nat", v: nat }); // so both sides can see both NATs
+    refreshConn(conn);
+  });
+}
+function refreshConn(conn = net.ctl) {
+  if (!conn || net.ctl !== conn || !conn.open || !net.connText) return;
+  const other = net.mode === "guest" ? "방장" : "친구";
+  ui.status(
+    `${net.connText} · 연결 방식: ${net.route ?? "확인 중…"} · 내 NAT: ${net.myNat ?? "확인 중…"} · ${other} NAT: ${net.peerNat ?? "확인 중…"}`,
+    "ok",
+    net.connCode
+  );
+}
+
+// ---- NAT check. Ask several STUN servers at different addresses for our public address from one socket.
+// Same public port from all: the router keeps one mapping for every destination ("일반형"), so the two
+// browsers can usually reach each other directly through STUN. Different ports: a symmetric NAT ("대칭형")
+// gives each destination its own port, so the address learned from STUN is useless to the friend → TURN.
+// (Some networks block UDP 3478, so two Google servers on 19302 are asked as well as Cloudflare.)
+const NAT_PROBE = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302", "stun:stun.cloudflare.com:3478"];
+let natCache = null;
+function natType() {
+  natCache ??= (async () => {
+    try {
+      const pc = new RTCPeerConnection({ iceServers: NAT_PROBE.map((urls) => ({ urls })) });
+      const ports = new Map(); // public ip -> Set of public ports
+      const answered = new Set(); // which STUN servers replied (when the browser says)
+      let srflx = 0, finish;
+      const done = new Promise((r) => (finish = r));
+      pc.onicecandidate = (e) => {
+        const c = e.candidate;
+        if (!c) return finish();
+        if (c.type !== "srflx") return;
+        srflx++;
+        const f = c.candidate.split(" "), ip = c.address ?? f[4], port = Number(c.port ?? f[5]);
+        if (!ports.has(ip)) ports.set(ip, new Set());
+        ports.get(ip).add(port);
+        const url = e.url || c.url;
+        if (url) answered.add(url);
+        if (answered.size >= 2 || [...ports.values()].some((s) => s.size > 1)) finish(); // enough to decide
+      };
+      pc.createDataChannel("nat");
+      await pc.setLocalDescription(await pc.createOffer());
+      await Promise.race([done, new Promise((r) => setTimeout(r, 10000))]);
+      pc.close();
+      if (!srflx) return "확인 불가(STUN 응답 없음 · UDP 차단 가능성)";
+      if ([...ports.values()].some((s) => s.size > 1)) return "대칭형(STUN 직접 연결 어려움)";
+      if (answered.size >= 2 || srflx >= 2) return "일반형(STUN 직접 연결 가능)";
+      return "확인 불가(STUN 서버 한 곳만 응답)";
+    } catch (err) {
+      return `확인 불가(${err.name ?? err})`;
+    }
+  })();
+  return natCache;
 }
 
 // The usual cause on a Mac: the browser lacks macOS's Local Network permission, so it cannot resolve the other
@@ -890,6 +959,7 @@ async function hostRoom() {
   if (net.starting) return;
   leave(true);
   ui.status("연결 준비 중…");
+  natType();
   net.starting = true;
   ui.sync();
   const options = await peerOptions().finally(() => (net.starting = false));
@@ -956,6 +1026,7 @@ async function joinRoom(raw) {
   if (net.starting) return;
   leave(true);
   ui.status("연결 준비 중…");
+  natType();
   net.starting = true;
   ui.sync();
   const peer = new Peer(await peerOptions().finally(() => (net.starting = false)));
@@ -1271,4 +1342,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType,renderOnce: () => (render(), composite(frame, img.data, BG)) };
