@@ -68,17 +68,22 @@ const GAME_KEYS = new Set([...Object.values(ANY).flat(), "Enter", "Space", "Esca
 const LOCAL = { held: new Set(), pressed: new Set() }, REMOTE = { held: new Set(), pressed: new Set() };
 const held = LOCAL.held, pressed = LOCAL.pressed;
 const typing = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+// one path for real keys and the touch buttons (which press the 1P keys for you)
+function keyDown(code, repeat = false) {
+  if (!repeat) pressed.add(code);
+  held.add(code);
+  if (net.mode === "guest" && !repeat && GAME_KEYS.has(code)) sendCtl({ t: "k", c: code, d: 1 });
+}
+function keyUp(code) {
+  held.delete(code);
+  if (net.mode === "guest" && GAME_KEYS.has(code)) sendCtl({ t: "k", c: code, d: 0 });
+}
 addEventListener("keydown", (e) => {
   if (typing(e)) return;
   if (GAME_KEYS.has(e.code)) e.preventDefault();
-  if (!e.repeat) pressed.add(e.code);
-  held.add(e.code);
-  if (net.mode === "guest" && !e.repeat && GAME_KEYS.has(e.code)) sendCtl({ t: "k", c: e.code, d: 1 });
+  keyDown(e.code, e.repeat);
 });
-addEventListener("keyup", (e) => {
-  held.delete(e.code);
-  if (net.mode === "guest" && GAME_KEYS.has(e.code)) sendCtl({ t: "k", c: e.code, d: 0 });
-});
+addEventListener("keyup", (e) => keyUp(e.code));
 addEventListener("blur", () => {
   held.clear();
   if (net.mode === "guest") sendCtl({ t: "rel" });
@@ -1054,6 +1059,55 @@ function applySnapshot(d) {
   }
 }
 
+// ---- touch controls (phones and tablets): on-screen buttons that press the 1P keys
+// 1P keys work for both players online (each side may use either layout), so one set of buttons covers it.
+const TOUCH = matchMedia("(pointer: coarse)").matches || new URLSearchParams(location.search).has("touch");
+(() => {
+  const pad = document.getElementById("pad");
+  if (!TOUCH || !pad) return;
+  document.body.classList.add("touch");
+  pad.hidden = false;
+  const down = new Map(); // pointerId -> the button it is holding
+  const release = (id) => {
+    const b = down.get(id);
+    if (!b) return;
+    down.delete(id);
+    b.classList.remove("on");
+    if (![...down.values()].includes(b)) keyUp(b.dataset.key);
+  };
+  const hold = (id, b) => {
+    if (down.get(id) === b) return;
+    release(id);
+    down.set(id, b);
+    b.classList.add("on");
+    keyDown(b.dataset.key);
+    if (navigator.userActivation?.hasBeenActive) navigator.vibrate?.(8); // a light buzz on Android
+  };
+  for (const b of pad.querySelectorAll("[data-key]")) {
+    b.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      // let a thumb slide from one button onto the next (throws for a pointer the browser no longer tracks)
+      try {
+        b.releasePointerCapture(e.pointerId);
+      } catch {}
+      hold(e.pointerId, b);
+    });
+    b.addEventListener("pointerenter", (e) => e.buttons && hold(e.pointerId, b));
+    b.addEventListener("pointerleave", (e) => down.get(e.pointerId) === b && release(e.pointerId));
+  }
+  for (const ev of ["pointerup", "pointercancel"]) addEventListener(ev, (e) => release(e.pointerId));
+  pad.addEventListener("contextmenu", (e) => e.preventDefault());
+  // tap the game screen to start (there is no Enter key on a phone)
+  document.getElementById("screen").addEventListener("pointerdown", () => {
+    if (game.state === "title" || game.state === "over") (keyDown("Enter"), setTimeout(() => keyUp("Enter"), 60));
+  });
+  const fs = document.getElementById("btn-full");
+  if (fs && document.fullscreenEnabled) {
+    fs.hidden = false;
+    fs.onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}));
+  }
+})();
+
 // ---- the online panel under the game
 const ui = (() => {
   const $ = (id) => document.getElementById(id);
@@ -1082,6 +1136,14 @@ const ui = (() => {
   };
   document.addEventListener("paste", paste);
   el.leave.onclick = () => leave();
+  // phones have no physical keys to read, so there the field takes ordinary typing; the code is converted
+  // (Hangul → keys, uppercase) only when joining, never mid-typing
+  if (TOUCH) {
+    el.code.readOnly = false;
+    el.code.setAttribute("autocapitalize", "characters");
+    el.code.setAttribute("inputmode", "text");
+    el.code.setAttribute("enterkeyhint", "go");
+  }
   return {
     status(text, kind = "", code = null) {
       el.status.textContent = text;

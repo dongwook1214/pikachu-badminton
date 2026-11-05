@@ -51,10 +51,70 @@
   }
   #net-status[data-kind="ok"] { color: #9dff9a; }
   #net-status[data-kind="warn"] { color: #ff8a7a; }
+
+  /* ---- touch controls (phones and tablets) */
+  .touch-help { display: none; }
+  body.touch { padding: 8px; gap: 10px; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
+  body.touch .keys, body.touch .kbd-help { display: none; }
+  body.touch .touch-help { display: block; width: min(100%, 1152px); }
+  body.touch #wrap { width: 100%; min-width: 0; }
+  #pad {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: end; gap: 8px;
+    width: min(100%, 1152px); touch-action: none; -webkit-touch-callout: none;
+  }
+  #pad[hidden] { display: none; }
+  #pad .cluster { display: grid; gap: 6px; }
+  #pad button {
+    width: 58px; height: 58px; padding: 0; border-radius: 50%; font-size: 15px; line-height: 1.1;
+    color: #ffeeb0; background: rgba(255, 210, 60, 0.16); border: 2px solid rgba(255, 210, 60, 0.55);
+    touch-action: none; -webkit-tap-highlight-color: transparent;
+  }
+  #pad button.on { background: rgba(255, 210, 60, 0.6); color: #1a1408; }
+  #pad button:hover { background: rgba(255, 210, 60, 0.16); }
+  #pad button.on:hover { background: rgba(255, 210, 60, 0.6); }
+  #pad .dpad { grid-template-columns: repeat(3, 58px); grid-template-rows: repeat(3, 58px); }
+  #pad .dpad button { border-radius: 14px; font-size: 20px; }
+  #pad .up { grid-area: 1 / 2; } #pad .left { grid-area: 2 / 1; } #pad .right { grid-area: 2 / 3; } #pad .down { grid-area: 3 / 2; }
+  #pad .menu { grid-auto-flow: column; justify-content: center; align-self: start; }
+  #pad .menu button { width: auto; min-width: 44px; height: 34px; padding: 0 10px; border-radius: 17px; font-size: 12px; }
+  #pad .acts { grid-template-areas: "zap hit" "dash hit"; align-items: center; }
+  #pad .zap { grid-area: zap; } #pad .dash { grid-area: dash; font-size: 13px; }
+  #pad .hit { grid-area: hit; width: 80px; height: 80px; font-size: 17px; }
+
+  /* landscape phone: the game fills the screen height and the buttons float over its lower corners */
+  @media (orientation: landscape) and (max-height: 600px) {
+    body.touch { padding: 0; }
+    body.touch #wrap { width: min(100vw, 100dvh * 16 / 9); }
+    body.touch canvas { border-radius: 0; box-shadow: none; }
+    body.touch #pad {
+      position: fixed; inset: auto 0 0 0; width: auto; padding: 0 max(10px, env(safe-area-inset-right)) 10px max(10px, env(safe-area-inset-left));
+      pointer-events: none; opacity: 0.8;
+    }
+    body.touch #pad .cluster { pointer-events: auto; }
+    body.touch #pad .menu { position: fixed; top: 6px; right: max(10px, env(safe-area-inset-right)); }
+  }
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="screen" width="384" height="216"></canvas></div>
+<div id="pad" hidden>
+  <div class="cluster dpad">
+    <button data-key="KeyW" class="up" aria-label="점프">▲</button>
+    <button data-key="KeyA" class="left" aria-label="왼쪽">◀</button>
+    <button data-key="KeyD" class="right" aria-label="오른쪽">▶</button>
+    <button data-key="KeyS" class="down" aria-label="아래">▼</button>
+  </div>
+  <div class="cluster menu">
+    <button data-key="Enter" class="small">START</button>
+    <button data-key="Escape" class="small" aria-label="일시정지">❚❚</button>
+    <button id="btn-full" class="small" hidden aria-label="전체 화면">⛶</button>
+  </div>
+  <div class="cluster acts">
+    <button data-key="KeyG" class="zap">전기</button>
+    <button data-key="KeyH" class="dash">전광<br>석화</button>
+    <button data-key="KeyF" class="hit">공격</button>
+  </div>
+</div>
 <div class="card online">
   <div class="row">
     <strong>온라인 대전</strong>
@@ -92,9 +152,12 @@
     </table>
   </div>
 </div>
-<p class="muted">기본 공격으로 칠 때 방향: 그냥 = 클리어 · 앞 = 드라이브 · 뒤 = 높은 로브 · 아래(<kbd>S</kbd>/<kbd>↓</kbd>) = 드롭.
+<p class="muted touch-help">폰: 왼쪽 버튼으로 이동·점프(▲), 오른쪽 버튼으로 공격·전기·전광석화. 화면을 누르면 시작해요.
+  칠 때 방향: 그냥 = 클리어 · 앞 = 드라이브 · 뒤 = 로브 · ▼ = 드롭. 점프 중에 공격으로 셔틀을 맞히면 스매시.
+  가로로 돌리면 더 크게 보여요. 온라인 대전은 화면 아래(가로 모드에선 스크롤)에서 방을 만들거나 참가하세요.</p>
+<p class="muted kbd-help">기본 공격으로 칠 때 방향: 그냥 = 클리어 · 앞 = 드라이브 · 뒤 = 높은 로브 · 아래(<kbd>S</kbd>/<kbd>↓</kbd>) = 드롭.
   점프한 채로 기본 공격을 셔틀에 맞히면 자동으로 아이언 테일 스매시가 나가요. 11점 먼저 내면 승리. <kbd>Enter</kbd> 시작 · <kbd>Esc</kbd> 일시정지.</p>
-<p class="muted">온라인에서는 각자 자기 키보드로 위 두 키 배치 중 편한 걸 쓰면 돼요. 방장 컴퓨터가 게임을 돌리니, 방장은 이 탭을 계속 앞에 띄워 두세요.</p>
+<p class="muted kbd-help">온라인에서는 각자 자기 키보드로 위 두 키 배치 중 편한 걸 쓰면 돼요. 방장 컴퓨터가 게임을 돌리니, 방장은 이 탭을 계속 앞에 띄워 두세요.</p>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script type="module" src="./game.js"></script>
 </body>
