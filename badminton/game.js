@@ -1097,6 +1097,17 @@ const TOUCH = matchMedia("(pointer: coarse)").matches || new URLSearchParams(loc
   }
   for (const ev of ["pointerup", "pointercancel"]) addEventListener(ev, (e) => release(e.pointerId));
   pad.addEventListener("contextmenu", (e) => e.preventDefault());
+  // no zooming on a game page. iPhone Safari ignores user-scalable=no and sometimes touch-action, so:
+  // swallow the second tap of a quick double tap (that is what zooms), except inside text fields
+  let lastTap = 0;
+  document.addEventListener("touchend", (e) => {
+    const now = e.timeStamp;
+    if (now - lastTap < 350 && !(e.target instanceof HTMLInputElement) && e.cancelable) e.preventDefault();
+    lastTap = now;
+  }, { passive: false });
+  document.addEventListener("dblclick", (e) => e.preventDefault(), { passive: false });
+  // and two-finger pinch (Safari's gesture events; other browsers obey the viewport tag)
+  for (const ev of ["gesturestart", "gesturechange"]) document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
   // tap the game screen to start (there is no Enter key on a phone)
   document.getElementById("screen").addEventListener("pointerdown", () => {
     if (game.state === "title" || game.state === "over") (keyDown("Enter"), setTimeout(() => keyUp("Enter"), 60));
