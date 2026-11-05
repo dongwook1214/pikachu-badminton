@@ -1101,12 +1101,58 @@ const TOUCH = matchMedia("(pointer: coarse)").matches || new URLSearchParams(loc
   document.getElementById("screen").addEventListener("pointerdown", () => {
     if (game.state === "title" || game.state === "over") (keyDown("Enter"), setTimeout(() => keyUp("Enter"), 60));
   });
-  const fs = document.getElementById("btn-full");
-  if (fs && document.fullscreenEnabled) {
-    fs.hidden = false;
-    fs.onclick = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {}));
-  }
+  setupPlayMode();
 })();
+
+// ---- full-screen sideways play: just the game and the buttons
+// Android: real full screen + landscape lock. iPhone Safari has no full screen for pages, so there we explain
+// "Add to Home Screen" (the manifest then opens it without browser bars) and offer the same layout anyway.
+function setupPlayMode() {
+  const $ = (id) => document.getElementById(id);
+  const play = $("btn-play"), exit = $("btn-exit"), iosHelp = $("ios-help");
+  const IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const INSTALLED = matchMedia("(display-mode: fullscreen), (display-mode: standalone)").matches || navigator.standalone === true;
+  const fsElement = () => document.fullscreenElement ?? document.webkitFullscreenElement;
+  let wake = null;
+  const keepAwake = async () => {
+    try {
+      wake = await navigator.wakeLock?.request("screen"); // the screen must not dim mid-rally
+    } catch {}
+  };
+  const setPlaying = (on) => {
+    document.body.classList.toggle("playing", on);
+    if (on) keepAwake();
+    else wake?.release?.().catch(() => {}), (wake = null);
+    scrollTo(0, 0);
+  };
+  function enter() {
+    const el = document.documentElement;
+    const request = el.requestFullscreen?.bind(el) ?? el.webkitRequestFullscreen?.bind(el);
+    const canFull = !INSTALLED && request && (document.fullscreenEnabled || document.webkitFullscreenEnabled);
+    if (!canFull && IOS && !INSTALLED) return void (iosHelp.hidden = false);
+    // switch the layout now; never wait on the full-screen promise (some browsers leave it pending)
+    setPlaying(true);
+    if (!canFull) return;
+    Promise.resolve()
+      .then(() => request({ navigationUI: "hide" }))
+      .then(() => screen.orientation?.lock?.("landscape")) // works on Android once in full screen
+      .catch(() => {});
+  }
+  function leavePlay() {
+    if (fsElement()) (document.exitFullscreen ?? document.webkitExitFullscreen)?.call(document);
+    screen.orientation?.unlock?.();
+    setPlaying(false);
+  }
+  play.hidden = false;
+  play.onclick = enter;
+  exit.onclick = leavePlay;
+  $("ios-ok").onclick = () => (iosHelp.hidden = true);
+  $("ios-anyway").onclick = () => ((iosHelp.hidden = true), setPlaying(true));
+  // the system "back"/Esc gesture can leave full screen on its own: follow it
+  for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(ev, () => !fsElement() && document.body.classList.contains("playing") && !INSTALLED && setPlaying(false));
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && document.body.classList.contains("playing") && keepAwake());
+  if (INSTALLED) play.textContent = "▶ 가로 화면으로 하기";
+}
 
 // ---- the online panel under the game
 const ui = (() => {
