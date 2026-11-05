@@ -340,8 +340,9 @@ function updatePlayer(p, dt) {
     const hx = p.x + p.face * 12, hy = p.y - 18;
     if (!a.hitS && canHitShuttle(p) && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS) {
       a.hitS = true;
-      if (p.ground) hitShuttle(p, "basic");
-      else ironTail(p); // in the air, the swing turns into Iron Tail: a smash
+      // in the air the swing turns into Iron Tail (a smash), except on the serve: a jump serve is a normal hit
+      if (p.ground || S.state === "serve") hitShuttle(p, "basic");
+      else ironTail(p);
     }
     if (!a.hitP && canBeHit(o) && circleBox(p.x + p.face * 14, p.y - 16, BASIC.reachP, hurtbox(o))) {
       a.hitP = true;
