@@ -1068,18 +1068,10 @@ function isMacChrome(ua = navigator.userAgent, brands = navigator.userAgentData?
   const note = document.getElementById("browser-note");
   if (!note) return;
   const force = new URLSearchParams(location.search).has("browsernote"); // to look at the note in any browser
-  let closed = false;
-  try {
-    closed = localStorage.getItem("pika.browserNote") === "closed";
-  } catch {}
-  if (!force && (closed || !isMacChrome())) return;
+  if (!force && !isMacChrome()) return;
+  // shown on every visit; closing it only hides it until the page is opened again
   note.hidden = false;
-  document.getElementById("browser-note-close").onclick = () => {
-    note.hidden = true;
-    try {
-      localStorage.setItem("pika.browserNote", "closed"); // once closed, it stays closed on this computer
-    } catch {}
-  };
+  document.getElementById("browser-note-close").onclick = () => (note.hidden = true);
 })();
 const browserName = () => {
   const ua = navigator.userAgent;
