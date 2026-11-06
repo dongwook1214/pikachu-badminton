@@ -1056,6 +1056,31 @@ async function iceReport(conn) {
     ` · signaling ${pc.signalingState} · 상대 SDP ${pc.remoteDescription?.type ?? "없음"} · ${browserName()}`
   );
 }
+// Google Chrome on a Mac (not an iPad posing as a Mac, and not Edge / Opera / Whale / Vivaldi / Brave / other
+// Chromium). Those get a "made for Safari" note: on recent macOS, Chrome's local-network permission often
+// does not apply to the copy of Chrome that actually runs, which breaks same-network online play.
+function isMacChrome(ua = navigator.userAgent, brands = navigator.userAgentData?.brands, touch = navigator.maxTouchPoints) {
+  if (!/Macintosh|Mac OS X/.test(ua) || touch > 1) return false;
+  if (brands?.length) return brands.some((b) => b.brand === "Google Chrome");
+  return /Chrome\/\d/.test(ua) && !/Edg\/|OPR\/|Whale\/|Vivaldi|Electron|CriOS/.test(ua);
+}
+(() => {
+  const note = document.getElementById("browser-note");
+  if (!note) return;
+  const force = new URLSearchParams(location.search).has("browsernote"); // to look at the note in any browser
+  let closed = false;
+  try {
+    closed = localStorage.getItem("pika.browserNote") === "closed";
+  } catch {}
+  if (!force && (closed || !isMacChrome())) return;
+  note.hidden = false;
+  document.getElementById("browser-note-close").onclick = () => {
+    note.hidden = true;
+    try {
+      localStorage.setItem("pika.browserNote", "closed"); // once closed, it stays closed on this computer
+    } catch {}
+  };
+})();
 const browserName = () => {
   const ua = navigator.userAgent;
   return /Edg\//.test(ua) ? "Edge" : /Chrome\//.test(ua) ? `Chrome ${ua.match(/Chrome\/(\d+)/)[1]}` : /Safari\//.test(ua) ? "Safari" : /Firefox\//.test(ua) ? "Firefox" : "기타 브라우저";
@@ -1514,4 +1539,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, isMacChrome, renderOnce: () => (render(), composite(frame, img.data, BG)) };

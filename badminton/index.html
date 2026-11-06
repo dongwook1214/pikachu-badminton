@@ -64,6 +64,13 @@
   .seg button { background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; }
   .seg button:hover:not(:disabled) { background: #2e2a4a; }
   .seg button[aria-pressed="true"] { background: #ffd23c; color: #1a1408; border-color: #ffd23c; }
+  #browser-note {
+    width: min(100%, 1152px); display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+    background: #2a2412; border: 1px solid #6b5a1e; border-radius: 8px; color: #ffe8a0;
+  }
+  #browser-note[hidden] { display: none; }
+  #browser-note span { flex: 1; }
+  #browser-note button { flex: none; color: #ffe8a0; border-color: #6b5a1e; }
   #net-status[data-kind="ok"] { color: #9dff9a; }
   #net-status[data-kind="warn"] { color: #ff8a7a; }
 
@@ -192,6 +199,10 @@
 </style>
 </head>
 <body>
+<div id="browser-note" hidden role="status">
+  <span>이 게임은 <b>사파리</b>에 맞춰져 있어요. 맥의 크롬에서는 온라인 대전 연결이 잘 안 될 수 있어요(최신 macOS 크롬의 로컬 네트워크 문제). 사파리로 열면 가장 잘 돼요.</span>
+  <button id="browser-note-close" class="ghost">닫기</button>
+</div>
 <div id="wrap"><canvas id="screen" width="384" height="216"></canvas></div>
 <button id="btn-play" hidden>▶ 전체 화면으로 하기</button>
 <div id="rotate" aria-live="polite"><div class="phone">📱</div><p>폰을 가로로 돌려 주세요</p></div>
