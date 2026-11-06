@@ -1328,9 +1328,12 @@ const TOUCH = matchMedia("(pointer: coarse)").matches || new URLSearchParams(loc
   setupPlayMode();
 })();
 
-// ---- full-screen sideways play: just the game and the buttons
-// Android: real full screen + landscape lock. iPhone Safari has no full screen for pages, so there we explain
+// ---- full-screen play: just the game and the buttons
+// Ordinary tall phones play sideways (Android also locks landscape). Near-square screens (iPhone Duo, other
+// foldables, tablets) are not locked: upright they get the handheld layout (game on top, controller below, see
+// index.html), sideways the full-height one. iPhone Safari has no full screen for pages, so there we explain
 // "Add to Home Screen" (the manifest then opens it without browser bars) and offer the same layout anyway.
+const TALL_SCREEN = () => Math.max(screen.width, screen.height) / Math.min(screen.width, screen.height) > 5 / 3;
 function setupPlayMode() {
   const $ = (id) => document.getElementById(id);
   const play = $("btn-play"), exit = $("btn-exit"), iosHelp = $("ios-help");
@@ -1359,7 +1362,7 @@ function setupPlayMode() {
     if (!canFull) return;
     Promise.resolve()
       .then(() => request({ navigationUI: "hide" }))
-      .then(() => screen.orientation?.lock?.("landscape")) // works on Android once in full screen
+      .then(() => TALL_SCREEN() && screen.orientation?.lock?.("landscape")) // Android, once in full screen
       .catch(() => {});
   }
   function leavePlay() {
@@ -1375,7 +1378,7 @@ function setupPlayMode() {
   // the system "back"/Esc gesture can leave full screen on its own: follow it
   for (const ev of ["fullscreenchange", "webkitfullscreenchange"]) document.addEventListener(ev, () => !fsElement() && document.body.classList.contains("playing") && !INSTALLED && setPlaying(false));
   document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && document.body.classList.contains("playing") && keepAwake());
-  if (INSTALLED) play.textContent = "▶ 가로 화면으로 하기";
+  if (INSTALLED) play.textContent = "▶ 게임 화면으로 하기";
 }
 
 // ---- the online panel under the game
