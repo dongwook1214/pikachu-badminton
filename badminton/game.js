@@ -115,6 +115,7 @@ const game = { state: "title", server: P1, timer: 0, msg: null, paused: false, w
 const effects = [], bolts = [], dust = [], marks = [];
 
 function resetRally(server) {
+  net.p2Epoch++; // positions reset: 2P's own prediction must restart from here
   game.server = server;
   P1.x = 96; P2.x = 288;
   for (const p of PLAYERS) {
@@ -184,6 +185,7 @@ function circleBox(cx, cy, r, b) {
 const canBeHit = (o) => !o.knocked && o.iframes <= 0;
 
 function stunPlayer(o, kind, from) {
+  if (o === P2) net.p2Epoch++; // the host moves 2P now (knockback, stun): its prediction yields to the host
   o.act = null;
   o.quickT = 0;
   o.trail = [];
@@ -270,6 +272,7 @@ function startQuick(p, dirX) {
 
 function updatePlayer(p, dt) {
   const o = other(p), c = p.ctl, dirX = (pHeld(p, c.right) ? 1 : 0) - (pHeld(p, c.left) ? 1 : 0);
+  const rep = guestMove(p); // online host: 2P moves where the guest's own (predicted) game says it is
   for (const k in p.cd) p.cd[k] = Math.max(0, p.cd[k] - dt);
   p.iframes = Math.max(0, p.iframes - dt);
 
@@ -289,18 +292,21 @@ function updatePlayer(p, dt) {
   }
 
   if (free && game.state !== "title" && game.state !== "over") {
-    if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
-    if (pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
+    if (rep) p.face = rep.f;
+    else if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
+    if (!rep && pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
     else if (!p.act && p.quickT <= 0) {
       if (pPressed(p, c.zap) && p.cd.zap <= 0) startAct(p, "zap");
       else if (pPressed(p, c.basic)) startAct(p, "basic");
     }
-    if (pPressed(p, c.up) && p.ground && p.quickT <= 0 && !(p.act && p.act.type === "tail")) {
+    if (!rep && pPressed(p, c.up) && p.ground && p.quickT <= 0 && !(p.act && p.act.type === "tail")) {
       p.vy = -JUMP_V;
       p.ground = false;
       puff(p.x, FLOOR, 3);
     }
-    if (p.quickT > 0) {
+    if (rep) {
+      // moved by the guest's report below
+    } else if (p.quickT > 0) {
       p.quickT -= dt;
       if (p.quickDir === "up") p.vx = dirX * RUN * 1.2;
     } else {
@@ -309,17 +315,22 @@ function updatePlayer(p, dt) {
     }
   }
 
-  // physics
-  const dashing = p.quickT > 0 && p.quickDir !== "up";
-  if (!dashing) p.vy += GRAV * dt;
-  p.x += p.vx * dt;
-  p.y += p.vy * dt;
-  if (p.y >= FLOOR) {
-    if (!p.ground && p.vy > 260) puff(p.x, FLOOR, 4);
-    p.y = FLOOR;
-    p.vy = 0;
-    p.ground = true;
-  } else p.ground = false;
+  // physics (or, for an online 2P moving freely, just the position its own game reported)
+  if (rep) {
+    Object.assign(p, { x: rep.x, y: rep.y, vx: rep.vx, vy: rep.vy, ground: !!rep.g, quickT: rep.q, quickDir: rep.qd });
+    p.cd.quick = rep.cq;
+  } else {
+    const dashing = p.quickT > 0 && p.quickDir !== "up";
+    if (!dashing) p.vy += GRAV * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.y >= FLOOR) {
+      if (!p.ground && p.vy > 260) puff(p.x, FLOOR, 4);
+      p.y = FLOOR;
+      p.vy = 0;
+      p.ground = true;
+    } else p.ground = false;
+  }
   if (p.x < 12 || p.x > W - 12) {
     p.x = clamp(p.x, 12, W - 12);
     if (p.knocked) p.vx *= -0.3;
@@ -821,14 +832,14 @@ function drawOverlay(P) {
 function render() {
   clearFrame(frame);
   let P = painterFor(frame);
-  for (const e of effects) e.fx.draw(frame, "back");
+  for (const e of effects) if (e.shown !== false) e.fx.draw(frame, "back");
   P = painterFor(frame);
   drawNet(P);
   for (const d of dust) P.dot(d.x, d.y, d.c, 1 - d.life / d.max);
   for (const p of PLAYERS) drawPlayer(p, P);
   drawShuttle(P);
   for (const b of bolts) drawBolt(P, b);
-  for (const e of effects) e.fx.draw(frame, "front");
+  for (const e of effects) if (e.shown !== false) e.fx.draw(frame, "front");
   P = painterFor(frame);
   drawHud(P);
   drawOverlay(P);
@@ -839,7 +850,7 @@ function render() {
 // snapshots the host streams on an unreliable "state" channel. Effects are sent once (with their seed) on "ctl",
 // and snapshots carry only their clock and position, so both screens show the same sparks.
 const ROOM_PREFIX = "pika-badminton-v1-";
-const net = { mode: "local", peer: null, ctl: null, state: null, code: null, seq: 0, lastSeq: -1, lastSend: 0, ping: null, pinger: 0 };
+const net = { mode: "local", peer: null, ctl: null, state: null, code: null, seq: 0, lastSeq: -1, lastSend: 0, ping: null, pinger: 0, p2Epoch: 0, p2Report: null };
 const fxById = new Map();
 const myId = () => (net.mode === "guest" ? 2 : 1);
 const sendCtl = (msg) => net.ctl?.open && net.ctl.send(msg);
@@ -874,7 +885,8 @@ function makeCode() {
 function leave(silent) {
   clearInterval(net.pinger);
   try { net.ctl?.close(); net.state?.close(); net.peer?.destroy(); } catch {}
-  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1, route: null, peerNat: null, connText: null });
+  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1, route: null, peerNat: null, connText: null, p2Report: null });
+  resetGuest();
   const wasOnline = net.mode !== "local";
   setMode("local");
   if (wasOnline) toTitle();
@@ -1138,7 +1150,7 @@ async function hostRoom() {
   peer.on("open", () => ui.status("친구에게 이 방 코드를 알려 주세요. 친구가 들어오길 기다리는 중…", "", code));
   peer.on("connection", (conn) => {
     watchConn(conn, "host");
-    if (conn.label === "state") return void (net.state = conn);
+    if (conn.label === "state") return void ((net.state = conn), conn.on("data", onGuestMove));
     if (net.ctl?.open) return void conn.on("open", () => (conn.send({ t: "full" }), setTimeout(() => conn.close(), 300)));
     ui.status("친구가 들어오는 중…", "", code);
     net.ctl = conn;
@@ -1221,13 +1233,14 @@ async function joinRoom(raw) {
       held.clear();
       effects.length = 0;
       fxById.clear();
+      resetGuest();
       setMode("guest");
       startPinging();
       showRoute(ctl, "연결됐어요! 나는 2P예요. 방장이나 내가 Enter를 누르면 시작해요", code);
     });
     ctl.on("data", onCtl);
     ctl.on("close", onDisconnect);
-    st.on("data", applySnapshot);
+    st.on("data", onSnapshot);
   });
   peer.on("error", (err) => {
     if (err.type === "peer-unavailable") (leave(true), ui.status("그 코드의 방을 찾을 수 없어요. 코드를 다시 확인해 주세요.", "warn"));
@@ -1242,11 +1255,12 @@ function snapshot() {
   return {
     seq: ++net.seq,
     fx: fxId,
+    ep: net.p2Epoch, // bumped whenever the host itself moves 2P (new rally, a hit): the guest re-syncs to it
     g: [game.state, r3(game.time), game.server.id, game.paused ? 1 : 0, r3(game.shakeT), game.shakeA, m ? [m.text, m.color, r3(m.t), m.dur, m.y] : 0],
     p: PLAYERS.map((p) => [
       r1(p.x), r1(p.y), r1(p.vx), p.face, p.ground ? 1 : 0, p.act ? [p.act.type, r3(p.act.t)] : 0,
       r3(p.cd.zap), r3(p.cd.tail), r3(p.cd.quick), r3(p.quickT), p.quickDir, r3(p.stun), p.stunKind, p.knocked ? 1 : 0, r3(p.iframes),
-      p.trail.map((g) => [r1(g.x), r1(g.y), g.flip ? 1 : 0, r3(g.a)]), p.score,
+      p.trail.map((g) => [r1(g.x), r1(g.y), g.flip ? 1 : 0, r3(g.a)]), p.score, r1(p.vy),
     ]),
     s: [r1(S.x), r1(S.y), r1(S.vx), r1(S.vy), S.state, r3(S.smash), S.trail.map((t) => [r1(t.x), r1(t.y)])],
     b: bolts.map((b) => [r1(b.x), r1(b.y), b.vx, b.seed]),
@@ -1255,9 +1269,8 @@ function snapshot() {
     e: effects.map((e) => [e.id, r3(e.fx.t), e.fx.options.x, e.fx.options.y, e.fx.options.flip ? 1 : 0, e.stopped ? 1 : 0]),
   };
 }
-function applySnapshot(d) {
-  if (net.mode !== "guest" || d.seq <= net.lastSeq) return; // unreliable channel: drop late arrivals
-  net.lastSeq = d.seq;
+// draw one snapshot's state (the guest calls this every frame with the snapshot it is showing)
+function applyState(d) {
   const [st, time, sid, paused, shakeT, shakeA, m] = d.g;
   Object.assign(game, { state: st, time, paused: !!paused, shakeT, shakeA, server: sid === 1 ? P1 : P2 });
   game.msg = m ? { text: m[0], color: m[1], t: m[2], dur: m[3], y: m[4] } : null;
@@ -1281,7 +1294,8 @@ function applySnapshot(d) {
   for (const [x, y, c, life, max] of d.d) dust.push({ x, y, c, life, max });
   marks.length = 0;
   for (const [x, t, inside] of d.m) marks.push({ x, t, inside: !!inside });
-  // effects: catch each one up to the host's clock; drop the ones the host has finished
+  // effects: catch each one up to the host's clock; drop the ones the host has finished; hide the ones that
+  // arrived early (their spawn message beats the snapshot we are showing) until the shown time reaches them
   const alive = new Set();
   for (const [id, t, x, y, flip, stopped] of d.e) {
     alive.add(id);
@@ -1293,8 +1307,127 @@ function applySnapshot(d) {
   }
   for (let i = effects.length - 1; i >= 0; i--) {
     const e = effects[i];
-    if (!alive.has(e.id) && e.id <= d.fx) (effects.splice(i, 1), fxById.delete(e.id));
+    e.shown = alive.has(e.id);
+    if (!e.shown && e.id <= d.fx) (effects.splice(i, 1), fxById.delete(e.id));
   }
+}
+
+// ---- 2P (the guest): smooth playback of the host's game, and its own Pikachu predicted locally
+// Snapshots are kept for a moment and the game is drawn INTERP seconds behind the newest one, blending
+// between the two around that time, so uneven packet arrival no longer shows as stutter or jumps.
+// The guest's own Pikachu does not wait for the round trip at all: it is moved here as keys are pressed
+// (same rules as updatePlayer) and its position is sent to the host, which uses it while 2P moves freely.
+// When the host moves 2P itself (a hit, a stun, a new rally) it bumps an epoch and the guest snaps to it.
+const INTERP = 0.05;
+const guest = { snaps: [], offs: [], latest: null, sendAt: 0 };
+const own = { epoch: -1, follow: true, n: 0, x: 288, y: FLOOR, vx: 0, vy: 0, ground: true, face: -1, quickT: 0, quickDir: null, cd: { zap: 0, quick: 0 }, act: null, trail: [] };
+function resetGuest() {
+  Object.assign(guest, { snaps: [], offs: [], latest: null });
+  Object.assign(own, { epoch: -1, follow: true, act: null, trail: [] });
+}
+function onSnapshot(d) {
+  if (net.mode !== "guest" || d.seq <= net.lastSeq) return; // unreliable channel: drop late arrivals
+  net.lastSeq = d.seq;
+  d.host = d.g[1];
+  guest.offs.push(performance.now() / 1000 - d.host); // arrival time minus host time; the smallest is the least delayed
+  if (guest.offs.length > 120) guest.offs.shift();
+  guest.snaps.push(d);
+  if (guest.snaps.length > 60) guest.snaps.shift();
+  guest.latest = d;
+  const a = d.p[1], hurt = a[11] > 0 || a[13];
+  if (hurt || d.ep !== own.epoch) {
+    // the host is moving 2P (or a new rally started): take its state as ours
+    Object.assign(own, { x: a[0], y: a[1], vx: a[2], vy: a[17] ?? 0, face: a[3], ground: !!a[4], quickT: a[9], quickDir: a[10], act: null, trail: [] });
+    own.cd = { zap: a[6], quick: a[8] };
+    own.epoch = d.ep;
+  }
+  own.follow = !!hurt;
+}
+// one fixed step of our own Pikachu (the movement half of updatePlayer; hits and scoring stay on the host)
+function predictSelf(dt) {
+  const L = guest.latest;
+  if (!L || own.follow) return;
+  const p = own, c = ANY, has = (k) => k.some((x) => held.has(x)), hit = (k) => k.some((x) => pressed.has(x));
+  const dirX = (has(c.right) ? 1 : 0) - (has(c.left) ? 1 : 0), st = L.g[0];
+  p.cd.zap = Math.max(0, p.cd.zap - dt);
+  p.cd.quick = Math.max(0, p.cd.quick - dt);
+  if (st !== "title" && st !== "over" && !L.g[3]) {
+    if (!p.act && p.quickT <= 0 && Math.abs(P1.x - p.x) > 1) p.face = Math.sign(P1.x - p.x);
+    if (hit(c.quick) && p.cd.quick <= 0 && p.quickT <= 0) {
+      Object.assign(p, { act: null, quickT: QUICK.dur });
+      p.cd.quick = QUICK.cd;
+      if (has(c.up)) Object.assign(p, { quickDir: "up", vy: -QUICK.up, ground: false, vx: dirX * RUN });
+      else {
+        const d = dirX === -p.face ? -p.face : p.face;
+        Object.assign(p, { quickDir: d, vx: d * QUICK.speed, vy: 0 });
+      }
+    } else if (!p.act && p.quickT <= 0) {
+      if (hit(c.zap) && p.cd.zap <= 0) (p.act = { type: "zap", t: 0 }), (p.cd.zap = ZAP.cd);
+      else if (hit(c.basic)) p.act = { type: "basic", t: 0 };
+    }
+    if (hit(c.up) && p.ground && p.quickT <= 0) (p.vy = -JUMP_V), (p.ground = false);
+    if (p.quickT > 0) {
+      p.quickT -= dt;
+      if (p.quickDir === "up") p.vx = dirX * RUN * 1.2;
+    } else p.vx = dirX * RUN * (p.act ? 0.55 : 1);
+  } else p.vx = 0;
+  if (!(p.quickT > 0 && p.quickDir !== "up")) p.vy += GRAV * dt;
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+  if (p.y >= FLOOR) (p.y = FLOOR), (p.vy = 0), (p.ground = true);
+  else p.ground = false;
+  p.x = clamp(p.x, 12, W - 12);
+  if (st === "serve") {
+    const gap = L.g[2] === 2 ? SERVICE_LINE : SERVE_GAP;
+    if (p.x < NET_X + gap) (p.x = NET_X + gap), (p.vx = Math.max(p.vx, 0));
+  }
+  if (p.quickT > 0) p.trail.push({ x: p.x, y: p.y, flip: p.face > 0, a: 0.8 });
+  for (const g of p.trail) g.a -= dt * 4;
+  p.trail = p.trail.filter((g) => g.a > 0).slice(-6);
+  if (p.act && (p.act.t += dt) >= (p.act.type === "zap" ? ZAP.dur : BASIC.dur)) p.act = null;
+}
+function sendSelf(now) {
+  if (own.follow || own.epoch < 0 || !net.state?.open || now - guest.sendAt < 15) return;
+  guest.sendAt = now;
+  net.state.send({ t: "pos", n: ++own.n, ep: own.epoch, x: r1(own.x), y: r1(own.y), vx: r1(own.vx), vy: r1(own.vy), g: own.ground ? 1 : 0, f: own.face, q: r3(own.quickT), qd: own.quickDir, cq: r3(own.cd.quick) });
+}
+// what the guest draws this frame
+function showGuest(now) {
+  const snaps = guest.snaps;
+  if (!snaps.length) return;
+  const H = now / 1000 - Math.min(...guest.offs) - INTERP; // the host time we are showing
+  let i = snaps.length - 1;
+  while (i > 0 && snaps[i].host > H) i--;
+  const A = snaps[i], B = snaps[i + 1] ?? A, k = B === A ? 0 : clamp((H - A.host) / (B.host - A.host));
+  if (i > 1) snaps.splice(0, i - 1);
+  applyState(A);
+  if (B !== A) {
+    const mix = (a, b) => a + (b - a) * k;
+    for (let n = 0; n < 2; n++) (PLAYERS[n].x = mix(A.p[n][0], B.p[n][0])), (PLAYERS[n].y = mix(A.p[n][1], B.p[n][1]));
+    if (A.s[4] === "fly" && B.s[4] === "fly" && Math.hypot(B.s[0] - A.s[0], B.s[1] - A.s[1]) < 60) (S.x = mix(A.s[0], B.s[0])), (S.y = mix(A.s[1], B.s[1]));
+    for (const b of bolts) {
+      const m = B.b.find((q) => q[3] === b.seed);
+      if (m) b.x = mix(b.x, m[0]);
+    }
+  }
+  const L = guest.latest.p[1];
+  // being hit shows as soon as it is known, not INTERP later
+  [P2.stun, P2.stunKind, P2.knocked, P2.iframes] = [L[11], L[12], !!L[13], L[14]];
+  if (own.follow) return; // the host is moving us: show its (smoothed) 2P
+  Object.assign(P2, { x: own.x, y: own.y, vx: own.vx, face: own.face, ground: own.ground, quickT: own.quickT, quickDir: own.quickDir, trail: own.trail });
+  P2.cd = { ...P2.cd, zap: own.cd.zap, quick: own.cd.quick };
+  // our swing shows at once; an Iron Tail (decided by the host when a jump swing meets the shuttle) shows from the host
+  P2.act = L[5] && L[5][0] === "tail" ? { type: "tail", t: L[5][1] } : own.act;
+}
+// the host's side: the guest's latest report of where its 2P is
+function onGuestMove(d) {
+  if (d?.t !== "pos" || net.mode !== "host") return;
+  if (!net.p2Report || d.n > net.p2Report.n || d.ep !== net.p2Report.ep) net.p2Report = { ...d, at: performance.now() };
+}
+function guestMove(p) {
+  const r = net.p2Report;
+  if (net.mode !== "host" || p !== P2 || !r || r.ep !== net.p2Epoch || p.knocked || p.stun > 0) return null;
+  return performance.now() - r.at < 250 ? r : null; // stale (connection hiccup): fall back to the guest's keys
 }
 
 // ---- touch controls (phones and tablets): on-screen buttons that press the 1P keys
@@ -1498,9 +1631,15 @@ function tick(now) {
   acc = Math.min(acc + (now - last) / 1000, 0.25);
   last = now;
   if (net.mode === "guest") {
-    // the host runs the game; we only draw the latest state it sent
-    pressed.clear();
-    acc = 0;
+    // the host runs the game; we move our own Pikachu ahead of it, tell the host where it is, and draw the
+    // host's game a moment behind, smoothed (see showGuest)
+    while (acc >= DT) {
+      predictSelf(DT);
+      pressed.clear();
+      acc -= DT;
+    }
+    sendSelf(now);
+    showGuest(now);
   } else {
     while (acc >= DT) {
       step(DT);
@@ -1539,4 +1678,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, isMacChrome, renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, isMacChrome, own, guest, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)) };
