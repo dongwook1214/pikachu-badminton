@@ -850,7 +850,7 @@ function render() {
 // snapshots the host streams on an unreliable "state" channel. Effects are sent once (with their seed) on "ctl",
 // and snapshots carry only their clock and position, so both screens show the same sparks.
 const ROOM_PREFIX = "pika-badminton-v1-";
-const net = { mode: "local", peer: null, ctl: null, state: null, code: null, seq: 0, lastSeq: -1, lastSend: 0, ping: null, pinger: 0, p2Epoch: 0, p2Report: null };
+const net = { mode: "local", peer: null, ctl: null, state: null, code: null, seq: 0, lastSeq: -1, lastSend: 0, ping: null, pinger: 0, p2Epoch: 0, p2Reports: [], p2Offs: [] };
 const fxById = new Map();
 const myId = () => (net.mode === "guest" ? 2 : 1);
 const sendCtl = (msg) => net.ctl?.open && net.ctl.send(msg);
@@ -885,7 +885,7 @@ function makeCode() {
 function leave(silent) {
   clearInterval(net.pinger);
   try { net.ctl?.close(); net.state?.close(); net.peer?.destroy(); } catch {}
-  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1, route: null, peerNat: null, connText: null, p2Report: null });
+  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1, route: null, peerNat: null, connText: null, p2Reports: [], p2Offs: [] });
   resetGuest();
   const wasOnline = net.mode !== "local";
   setMode("local");
@@ -1389,7 +1389,7 @@ function predictSelf(dt) {
 function sendSelf(now) {
   if (own.follow || own.epoch < 0 || !net.state?.open || now - guest.sendAt < 15) return;
   guest.sendAt = now;
-  net.state.send({ t: "pos", n: ++own.n, ep: own.epoch, x: r1(own.x), y: r1(own.y), vx: r1(own.vx), vy: r1(own.vy), g: own.ground ? 1 : 0, f: own.face, q: r3(own.quickT), qd: own.quickDir, cq: r3(own.cd.quick) });
+  net.state.send({ t: "pos", n: ++own.n, ep: own.epoch, tm: r3(now / 1000), x: r1(own.x), y: r1(own.y), vx: r1(own.vx), vy: r1(own.vy), g: own.ground ? 1 : 0, f: own.face, q: r3(own.quickT), qd: own.quickDir, cq: r3(own.cd.quick) });
 }
 // what the guest draws this frame
 function showGuest(now) {
@@ -1413,21 +1413,40 @@ function showGuest(now) {
   const L = guest.latest.p[1];
   // being hit shows as soon as it is known, not INTERP later
   [P2.stun, P2.stunKind, P2.knocked, P2.iframes] = [L[11], L[12], !!L[13], L[14]];
-  if (own.follow) return; // the host is moving us: show its (smoothed) 2P
-  Object.assign(P2, { x: own.x, y: own.y, vx: own.vx, face: own.face, ground: own.ground, quickT: own.quickT, quickDir: own.quickDir, trail: own.trail });
-  P2.cd = { ...P2.cd, zap: own.cd.zap, quick: own.cd.quick };
-  // our swing shows at once; an Iron Tail (decided by the host when a jump swing meets the shuttle) shows from the host
-  P2.act = L[5] && L[5][0] === "tail" ? { type: "tail", t: L[5][1] } : own.act;
+  if (!own.follow) {
+    // our own Pikachu, where we predict it (while the host moves us after a hit, its smoothed 2P is shown instead)
+    Object.assign(P2, { x: own.x, y: own.y, vx: own.vx, face: own.face, ground: own.ground, quickT: own.quickT, quickDir: own.quickDir, trail: own.trail });
+    P2.cd = { ...P2.cd, zap: own.cd.zap, quick: own.cd.quick };
+    // our swing shows at once; an Iron Tail (decided by the host when a jump swing meets the shuttle) shows from the host
+    P2.act = L[5] && L[5][0] === "tail" ? { type: "tail", t: L[5][1] } : own.act;
+  }
+  // a shuttle waiting to be served sits in the server's hand as drawn here, not where the snapshot had it
+  if (S.state === "serve") followServer();
 }
 // the host's side: the guest's latest report of where its 2P is
+// Reports arrive unevenly, so 2P is played back INTERP behind the newest one, blending between the two around
+// that moment (on the guest's own clock, sent with each report) instead of jumping to each as it lands.
 function onGuestMove(d) {
   if (d?.t !== "pos" || net.mode !== "host") return;
-  if (!net.p2Report || d.n > net.p2Report.n || d.ep !== net.p2Report.ep) net.p2Report = { ...d, at: performance.now() };
+  const list = net.p2Reports, last = list[list.length - 1], now = performance.now();
+  if (last && d.ep === last.ep && d.n <= last.n) return; // arrived late
+  if (last && d.ep !== last.ep) list.length = 0; // a new epoch starts a new track
+  list.push({ ...d, at: now });
+  if (list.length > 40) list.shift();
+  net.p2Offs.push(now / 1000 - d.tm); // arrival minus send time; the smallest is the least delayed
+  if (net.p2Offs.length > 120) net.p2Offs.shift();
 }
 function guestMove(p) {
-  const r = net.p2Report;
-  if (net.mode !== "host" || p !== P2 || !r || r.ep !== net.p2Epoch || p.knocked || p.stun > 0) return null;
-  return performance.now() - r.at < 250 ? r : null; // stale (connection hiccup): fall back to the guest's keys
+  const list = net.p2Reports, last = list[list.length - 1];
+  if (net.mode !== "host" || p !== P2 || !last || last.ep !== net.p2Epoch || p.knocked || p.stun > 0) return null;
+  if (performance.now() - last.at > 250) return null; // stale (connection hiccup): fall back to the guest's keys
+  const T = performance.now() / 1000 - Math.min(...net.p2Offs) - INTERP; // the guest's moment we show
+  let i = list.length - 1;
+  while (i > 0 && list[i].tm > T) i--;
+  const A = list[i], B = list[i + 1] ?? A, k = B === A ? 0 : clamp((T - A.tm) / (B.tm - A.tm));
+  if (i > 1) list.splice(0, i - 1);
+  const mix = (a, b) => a + (b - a) * k;
+  return { ...A, x: mix(A.x, B.x), y: mix(A.y, B.y), vx: mix(A.vx, B.vx), vy: mix(A.vy, B.vy) };
 }
 
 // ---- touch controls (phones and tablets): on-screen buttons that press the 1P keys
