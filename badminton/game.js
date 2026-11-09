@@ -16,6 +16,7 @@ const GRAV = 900, JUMP_V = 330, RUN = 115;
 const SH_G = 420, SH_K = 0.0028;              // shuttle gravity and quadratic drag (tuned in a sim)
 const WIN = 11;
 const SERVE_GAP = 12; // during the serve, how close to the net a player's center may get
+const SERVICE_LINE = 56; // the short service lines sit this far either side of the net; the server stays behind theirs
 const DT = 1 / 60;
 
 // move timings (seconds)
@@ -323,10 +324,12 @@ function updatePlayer(p, dt) {
     p.x = clamp(p.x, 12, W - 12);
     if (p.knocked) p.vx *= -0.3;
   }
-  // until the serve is hit, each player stays on their own side of the net
+  // until the serve is hit, each player stays on their own side of the net, and the server stays behind
+  // their service line (walking, jumping, Quick Attack or being knocked back all stop at it)
   if (game.state === "serve") {
-    if (p === P1 && p.x > NET_X - SERVE_GAP) (p.x = NET_X - SERVE_GAP), (p.vx = Math.min(p.vx, 0));
-    if (p === P2 && p.x < NET_X + SERVE_GAP) (p.x = NET_X + SERVE_GAP), (p.vx = Math.max(p.vx, 0));
+    const gap = p === game.server ? SERVICE_LINE : SERVE_GAP;
+    if (p === P1 && p.x > NET_X - gap) (p.x = NET_X - gap), (p.vx = Math.min(p.vx, 0));
+    if (p === P2 && p.x < NET_X + gap) (p.x = NET_X + gap), (p.vx = Math.max(p.vx, 0));
   }
   if (p.knocked && p.ground && p.knockT > 0.05) {
     p.knocked = false;
@@ -648,7 +651,7 @@ const BG = (() => {
   }
   for (let y = FLOOR; y < H; y += 4) for (let x = (y / 4) % 2 ? 0 : 20; x < W; x += 40) if (x < COURT_L || x > COURT_R) p.rect(x, y, 1, 4, C("#4e351f"));
   p.rect(COURT_L, FLOOR, COURT_R - COURT_L + 1, 1, C("#e8ecf4"));
-  for (const x of [COURT_L, COURT_R, NET_X - 56, NET_X + 56]) p.rect(x, FLOOR, 1, H - FLOOR, C(x === COURT_L || x === COURT_R ? "#e8ecf4" : "#9fc8b0"));
+  for (const x of [COURT_L, COURT_R, NET_X - SERVICE_LINE, NET_X + SERVICE_LINE]) p.rect(x, FLOOR, 1, H - FLOOR, C(x === COURT_L || x === COURT_R ? "#e8ecf4" : "#9fc8b0"));
   return f.color.slice();
 })();
 
@@ -775,6 +778,11 @@ function drawHud(P) {
   }
   if (game.state === "serve") {
     const s = game.server;
+    // light up the server's service line on the floor so it's clear where the serve must come from
+    const lx = s === P1 ? NET_X - SERVICE_LINE : NET_X + SERVICE_LINE, glow = 0.55 + 0.45 * Math.sin(game.time * 6);
+    P.rect(lx, FLOOR, 1, H - FLOOR, VOLT[6], glow);
+    P.rect(lx, FLOOR - 1, 1, 1, VOLT[6], glow);
+    P.glow(lx, FLOOR + 6, 10, VOLT[4], 0.35 * glow);
     if (Math.floor(game.time * 3) % 2) P.text("HIT TO SERVE", Math.round(s.x), Math.round(s.y + s.spr.ay - 22), C("#ffffff"), { align: "center", outline: INK });
   }
   for (const m of marks) {
