@@ -216,26 +216,33 @@ function stunPlayer(o, kind, from) {
   }
 }
 
-function hitShuttle(p, kind) {
-  const c = p.ctl, fwd = pHeld(p, p.face > 0 ? c.right : c.left), back = pHeld(p, p.face > 0 ? c.left : c.right), down = pHeld(p, c.down);
+// how a hit from (x, y) sends the shuttle off. dir is the direction held: "down" a drop, "fwd" a drive,
+// "back" a lob, "" a clear (Iron Tail ignores it)
+function shotVel(face, x, y, kind, dir) {
   let sp, ang;
   if (kind === "tail") {
     sp = 560;
     ang = 20;
-    const ahead = (NET_X - S.x) * p.face; // > 0 when the net is still in front of the shuttle
-    if (ahead > 4) ang = Math.min(20, (Math.atan2(NET_TOP - 10 - S.y, ahead) * 180) / Math.PI - 3);
+    const ahead = (NET_X - x) * face; // > 0 when the net is still in front of the shuttle
+    if (ahead > 4) ang = Math.min(20, (Math.atan2(NET_TOP - 10 - y, ahead) * 180) / Math.PI - 3);
     ang = Math.max(ang, -40);
   } else {
     // clears, lobs and drives aim ~30 px inside the far baseline: speed fitted in a sim to distance and height
-    const dist = p.face > 0 ? COURT_R - S.x : S.x - COURT_L, h = FLOOR - S.y;
-    if (down) (sp = 220), (ang = -34);
-    else if (fwd) (sp = clamp(40 + 1.607 * dist - 1.283 * h, 260, 560)), (ang = -22);
-    else if (back) (sp = clamp(-217 + 3.302 * dist - 0.453 * h, 300, 640)), (ang = -68);
+    const dist = face > 0 ? COURT_R - x : x - COURT_L, h = FLOOR - y;
+    if (dir === "down") (sp = 220), (ang = -34);
+    else if (dir === "fwd") (sp = clamp(40 + 1.607 * dist - 1.283 * h, 260, 560)), (ang = -22);
+    else if (dir === "back") (sp = clamp(-217 + 3.302 * dist - 0.453 * h, 300, 640)), (ang = -68);
     else (sp = clamp(-7 + 1.714 * dist - 0.575 * h, 250, 560)), (ang = -52);
   }
   const r = (ang * Math.PI) / 180;
-  S.vx = Math.cos(r) * sp * p.face;
-  S.vy = Math.sin(r) * sp;
+  return { vx: Math.cos(r) * sp * face, vy: Math.sin(r) * sp, r };
+}
+
+function hitShuttle(p, kind) {
+  const c = p.ctl, fwd = pHeld(p, p.face > 0 ? c.right : c.left), back = pHeld(p, p.face > 0 ? c.left : c.right), down = pHeld(p, c.down);
+  const { vx, vy, r } = shotVel(p.face, S.x, S.y, kind, down ? "down" : fwd ? "fwd" : back ? "back" : "");
+  S.vx = vx;
+  S.vy = vy;
   S.state = "fly";
   S.last = p;
   S.smash = kind === "tail" ? 1 : 0;
@@ -486,6 +493,9 @@ const AI_LEVELS = {
   easy: { name: "EASY", react: 0.4, aimErr: 22, miss: 0.25, smash: 0.12, zap: 0.05, dash: false, dodge: 0.15, serveWait: [1.4, 2.2] },
   normal: { name: "NORMAL", react: 0.2, aimErr: 9, miss: 0.08, smash: 0.45, zap: 0.15, dash: true, dodge: 0.5, serveWait: [0.9, 1.6] },
   hard: { name: "HARD", react: 0.07, aimErr: 3, miss: 0, smash: 0.85, zap: 0.3, dash: true, dodge: 0.9, serveWait: [0.5, 1.0] },
+  // smart: plays every shot out (smash or each ground shot) and picks the one hardest to return, never hits it
+  // out or into the net, and times its zaps to stun the other player just before they must hit (not now and then)
+  extreme: { name: "EXTREME", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.35, 0.6], smart: true },
 };
 const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, dodged: new Set() };
 const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
@@ -501,10 +511,11 @@ function setAI(level) {
   else if (net.mode === "local") (P1.ctl = CONTROLS[1]), (P2.ctl = CONTROLS[2]), (P1.src = P2.src = LOCAL);
 }
 
-// where the shuttle will be, frame by frame, until it lands (same integrator and net as updateShuttle)
-function predictShuttle(maxT = 2.5) {
+// where the shuttle (or one starting from `from`) will be, frame by frame, until it lands (same integrator and
+// net as updateShuttle)
+function predictShuttle(maxT = 2.5, from = S) {
   const out = [], h = DT / 4;
-  let x = S.x, y = S.y, vx = S.vx, vy = S.vy;
+  let { x, y, vx, vy } = from;
   for (let t = DT; t <= maxT; t += DT) {
     for (let k = 0; k < 4; k++) {
       const v = Math.hypot(vx, vy);
@@ -521,16 +532,71 @@ function predictShuttle(maxT = 2.5) {
   return out;
 }
 
-// pick the point to meet the shuttle: a jump smash if it comes high enough (and we feel like it), else a ground hit
+// pick the point to meet the shuttle: a jump smash if it comes high enough (and we feel like it), else a ground hit.
+// A smart AI only jumps for a smash that lands in even if the swing meets the shuttle a little late, and only
+// when it is harder to return than the best shot it could play from the ground.
 function aiPlan(me) {
-  const path = predictShuttle(), mine = (s) => (me === P2 ? s.x > NET_X + 8 : s.x < NET_X - 8);
-  const reach = (s) => Math.abs(s.x - me.face * 12 - me.x) <= RUN * s.t + (AI_LEVELS[ai.level].dash && me.cd.quick <= 0 ? 70 : 0) + 14;
-  if (ai.wantSmash) {
+  const path = predictShuttle(), mine = (s) => (me === P2 ? s.x > NET_X + 8 : s.x < NET_X - 8), L = AI_LEVELS[ai.level], op = other(me);
+  const reach = (s) => Math.abs(s.x - me.face * 12 - me.x) <= RUN * s.t + (L.dash && me.cd.quick <= 0 ? 70 : 0) + 14;
+  const smashIn = (i) => path.slice(i, i + 7).every((q) => tailIn(me, q));
+  const low = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32 && reach(s)) ?? path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32);
+  if (ai.wantSmash && !L.smart) {
     const high = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 82 && s.y < FLOOR - 52 && reach(s));
     if (high) return { ...high, smash: true };
+  } else if (ai.wantSmash) {
+    // the smash (meeting it anywhere it is in jump reach) leaving them the least time, if that beats the ground
+    let best = null, bestSpare = Infinity;
+    path.forEach((s, i) => {
+      if (!(mine(s) && s.vy > 0 && s.y > FLOOR - 82 && s.y < FLOOR - 52 && reach(s) && smashIn(i))) return;
+      const spare = spareTime(op, shotPath(me, s, "tail"));
+      if (spare < bestSpare) (best = s), (bestSpare = spare);
+    });
+    const ground = low ? shotOptions(me, op, low).map((o) => o.spare) : [];
+    if (best && (!ground.length || bestSpare < Math.min(...ground))) return { ...best, smash: true };
   }
-  const low = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32 && reach(s)) ?? path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32);
   return low ? { ...low, smash: false } : null;
+}
+
+// does a shuttle on this path come down inside the court on op's side (with a little room off the lines)?
+function landsIn(path, op) {
+  const end = path.at(-1);
+  return !!end?.land && end.x > COURT_L + 8 && end.x < COURT_R - 8 && (end.x < NET_X) === (op.x < NET_X);
+}
+// the shuttle's path after me hits it at s, with this kind of hit and direction held
+const shotPath = (me, s, kind, dir = "") => predictShuttle(3, { x: s.x, y: s.y, ...shotVel(me.face, s.x, s.y, kind, dir) });
+// would an Iron Tail meeting the shuttle at s land in? (close under the net it has to go up, and flies out)
+const tailIn = (me, s) => landsIn(shotPath(me, s, "tail"), other(me));
+// how long op would have to spare at their best chance to meet a shuttle on this path (< 0: they can't):
+// the time until it gets there, less the time to run (or Quick Attack) to where their swing reaches it
+function spareTime(op, path) {
+  const theirs = (s) => (op.x < NET_X ? s.x < NET_X : s.x > NET_X), dash = op.cd.quick <= 0 ? QUICK.speed * QUICK.dur : 0;
+  let best = -Infinity;
+  for (const s of path) {
+    if (!theirs(s) || s.y < FLOOR - 80) continue; // above a jump's reach
+    const run = Math.max(0, Math.abs(s.x - op.face * 12 - op.x) - 14);
+    best = Math.max(best, s.t - Math.min(run / RUN, Math.max(0, run - dash) / RUN + (dash ? QUICK.dur : 0)));
+  }
+  return best;
+}
+// can a zap, fired once the swing is over, stun op in the last moment before they must meet a shuttle on this path?
+// (the stun outlasts that moment: only a jump over the bolt saves them)
+function zapInTime(me, op, path) {
+  const busy = BASIC.dur - BASIC.on, meet = path.find((s) => (op.x < NET_X ? s.x < NET_X : s.x > NET_X) && s.y > FLOOR - 40);
+  return me.cd.zap <= busy && !!meet && meet.t - busy - zapTravel(me, op) > 0.05;
+}
+const zapTravel = (me, op) => ZAP.fire + Math.max(0, Math.abs(op.x - me.x) - 30) / ZAP.speed;
+// the ground shots from s that land in, each with the time it leaves op to spare (a timed zap's stun counted in)
+const shotOptions = (me, op, s) =>
+  ["", "fwd", "back", "down"].map((dir) => ({ dir, path: shotPath(me, s, "basic", dir) })).filter((o) => landsIn(o.path, op))
+    .map((o) => ({ dir: o.dir, spare: spareTime(op, o.path) - (zapInTime(me, op, o.path) ? STUN.zap : 0) }));
+// the direction to hold for the shot hardest to return, played out from where the swing will meet the shuttle
+// (a frame from now): one leaving them the least time to spare (any within a tenth of a second of the best,
+// so it doesn't always play the same shot)
+function killerShot(me, op) {
+  const shots = shotOptions(me, op, S.state === "fly" ? (predictShuttle(1.5 * DT)[0] ?? S) : S);
+  if (!shots.length) return null;
+  const best = Math.min(...shots.map((o) => o.spare)), near = shots.filter((o) => o.spare <= best + 0.1);
+  return near[(Math.random() * near.length) | 0].dir;
 }
 
 function aiStep() {
@@ -546,7 +612,9 @@ function aiStep() {
   if (now < ai.shotUntil) ai.shotKeys.forEach(hold);
   const chooseShot = (serve) => {
     const r = Math.random(), opNearNet = Math.abs(op.x - NET_X) < 60, opDeep = Math.abs(op.x - NET_X) > 130;
-    ai.shotKeys = serve ? (r < 0.6 ? [] : r < 0.8 ? [back] : ["down"])
+    const kill = L.smart ? killerShot(me, op) : null;
+    ai.shotKeys = kill !== null ? { "": [], fwd: [fwd], back: [back], down: ["down"] }[kill]
+      : serve ? (r < 0.6 ? [] : r < 0.8 ? [back] : ["down"])
       : opNearNet ? (r < 0.6 ? [] : [back])
       : opDeep ? (r < 0.5 ? ["down"] : r < 0.8 ? [fwd] : [])
       : [[], [fwd], [back], ["down"]][(r * 4) | 0];
@@ -580,23 +648,33 @@ function aiStep() {
     if (ai.plan) target = clamp(ai.plan.x - me.face * 12 + ai.err, me === P2 ? NET_X + 10 : 12, me === P2 ? W - 12 : NET_X - 10);
   }
   const dx = target - me.x, left = ai.plan ? ai.plan.t - (now - ai.plan.at) : 9;
-  if (Math.abs(dx) > 3) hold(dx > 0 ? "right" : "left");
+  // (a smart AI stands still while a shot's direction is held, so walking doesn't turn it into another shot)
+  if (Math.abs(dx) > 3 && !(L.smart && now < ai.shotUntil)) hold(dx > 0 ? "right" : "left");
   // far and running out of time: Quick Attack towards it
   if (L.dash && ai.plan && Math.abs(dx) > 55 && left < Math.abs(dx) / RUN && me.cd.quick <= 0 && me.quickT <= 0) press("quick");
   // a high one: jump so the swing meets it at the top (the swing then becomes Iron Tail)
   if (ai.plan?.smash && me.ground && Math.abs(dx) < 16 && left < 0.32 && left > 0.12) press("up");
 
   // swing when the shuttle is in reach
-  const hx = me.x + me.face * 12, hy = me.y - 18;
-  if (!ai.skip && !me.act && S.last !== me && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS * 0.95) {
+  // (in the air the swing is an Iron Tail: a smart AI holds it rather than smash the shuttle out)
+  const hx = me.x + me.face * 12, hy = me.y - 18, tailOk = me.ground || !L.smart || tailIn(me, predictShuttle(1.5 * DT)[0] ?? S);
+  if (!ai.skip && !me.act && S.last !== me && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS * 0.95 && tailOk) {
     if (me.ground) chooseShot(false);
     else (ai.shotKeys = []), (ai.shotUntil = 0);
+    if (L.smart) held.clear();
     ai.shotKeys.forEach(hold);
     press("basic");
   }
 
   // zap the other player now and then, when nothing more urgent is going on
   if (me.cd.zap <= 0 && !me.act && me.ground && op.ground && Math.abs(op.x - me.x) > 50 && left > 0.8 && Math.random() < L.zap * DT) press("zap");
+  // smart: once our shot is on its way, send a bolt to stun them in the last moment before they must hit it
+  // (the stun outlasts that moment, so only a jump over the bolt saves them)
+  if (L.smart && S.last === me && me.cd.zap <= 0 && !me.act && me.ground && op.ground && canBeHit(op) && op.stun <= 0) {
+    const meet = predictShuttle().find((s) => (op.x < NET_X ? s.x < NET_X : s.x > NET_X) && s.y > FLOOR - 40);
+    const lead = meet && meet.t - zapTravel(me, op);
+    if (lead > 0.05 && lead < 0.4) press("zap");
+  }
   // a bolt coming our way: hop over it
   for (const b of bolts) {
     if (b.owner === me || ai.dodged.has(b.seed)) continue;
@@ -1660,7 +1738,7 @@ const ui = (() => {
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
     status.textContent =
       net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
-      : ai.on ? `AI(${{ easy: "쉬움", normal: "보통", hard: "어려움" }[ai.level]})와 대전해요. 나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`
+      : ai.on ? `AI(${{ easy: "쉬움", normal: "보통", hard: "어려움", extreme: "극악" }[ai.level]})와 대전해요. 나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`
       : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
   };
   for (const b of buttons)
