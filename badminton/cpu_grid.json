@@ -37,5 +37,55 @@
   "t": "#ffd640",
   "k": "#3c2a14"
  },
- "center_x": 15
+ "center_x": 15,
+ "squash": [
+  {
+   "rows": [
+    "...............KKKKKK................",
+    ".............KKCCCCCCKK..............",
+    "............KCCCWWCCCCCKK............",
+    ".........KKKCCCWCCCCCCCCCK...........",
+    "......KKKCCCCCCCCCCCCCCCCCK.....kkkkk",
+    "....KKCCCCCCCCCCCCCCCCCCCCKK...kttttk",
+    "...KCCCCWWCCCCCCCCCCCCCCCCCCK.ktttk..",
+    "...KCCCCCCCCCCCCCCCCCCCCCCCCCKttttkk.",
+    "..KCCCCCCCCCCCCCCCCCCCCCCCCCCCKkttk..",
+    "..KCCCCCCCCCCCCCCCCCCCCCCCCCCCCKttk..",
+    "..KCCCCCCCCCKKKCCCCCCKKKCCCCCCCKtk...",
+    ".KCCCCCCCCCCCCCCCCCCCCCCCCCCCCDKk....",
+    "KCCCCCCCPPCCCCCCCCCCCCCCPPCCCCK......",
+    "KCCCCCCCCCCCCCCKCCKCCCCCCCCCCCK......",
+    "KDCCCCCCCCCCCCCCKKCCCCCCCCCCCCK......",
+    ".KDMMMMMMMMMMMMMMMMMMMMMMMMMMMK......",
+    "..KDMMMMMMMMMMMMMMMMMMMMMMMMDDK......",
+    "...KDDDDDDDDMMMMMMMMMMDDDDDDKK.......",
+    "....KKKKKKKKDDDDDDDDDDKKKKKK.........",
+    "............KKKDDDDKKK...............",
+    ".........KFFFK.KKKK.KFFFK............"
+   ],
+   "center_x": 17
+  },
+  {
+   "rows": [
+    "..................KKK...................",
+    ".............KKKKKCCCKKKK...............",
+    "...........KKCCCCWWCCCCCCKK........kkkkk",
+    "......KKKKKCCCCCWCCCCCCCCCCK......kttttk",
+    "....KKCCCCCCCCCCCCCCCCCCCCCCKK...ktttk..",
+    "...KCCCCWWCCCCCCCCCCCCCCCCCCCCKKkttttkk.",
+    "..KCCCCCCCCCCCCCCCCCCCCCCCCCCCCCKkkttk..",
+    ".KCCCCCCCCCCKKCCCCCCCCCKKCCCCCCCCKkttk..",
+    ".KCCCCCCCCCCCCKCCCCCCCKCCCCCCCCCCDKtk...",
+    "KCCCCCCCCCCCKKCCCCCCCCCKKCCCCCCCCKtk....",
+    "KCCCCCCCPPCCCCCCKCCKCCCCCCPPCCCCCK......",
+    "KCCCCCCCCCCCCCCCCKKCCCCCCCCCCCCCCK......",
+    "KDMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMDK......",
+    ".KDDDMMMMMMDMMMMMMMMMMMMMMMMMDDDK.......",
+    "..KKKDDDDDDKDDDDDDDDDDDDDDDDDKKK........",
+    ".....KKKKKK.KKKDDDDDDKKKKKKKK...........",
+    "...............KKKKKK..................."
+   ],
+   "center_x": 18
+  }
+ ]
 }

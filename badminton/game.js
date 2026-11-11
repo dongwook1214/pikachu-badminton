@@ -16,7 +16,7 @@ const GRAV = 900, JUMP_V = 330, RUN = 115;
 const SH_G = 420, SH_K = 0.0028;              // shuttle gravity and quadratic drag (tuned in a sim)
 const WIN = 11;
 const SERVE_GAP = 12; // during the serve, how close to the net a player's center may get
-const SQUASH = { y: 0.62, x: 1.22, rate: 16 }; // Down held: height and width at full squash, ease speed
+const SQUASH = { rate: 16 }; // Down held: how fast the squash eases in and out (the frames are hand-drawn)
 const SERVICE_LINE = 56; // the short service lines sit this far either side of the net; the server stays behind theirs
 const DT = 1 / 60;
 
@@ -35,7 +35,7 @@ const WHITE = C("#ffffff"), INK = C("#0b0a12");
 // players: pikachu_grid.json (art/pikachu_pixel.py); the CPU opponent: cpu_grid.json (art/cpu_pixel.py, original)
 // A sprite: trimmed rows, its palette, the offset that puts its feet at (0, 0), and a pixelfx actor (mask +
 // pixels) for the effects that wrap a body (electrified, stunned). squash: hand-drawn frames for holding Down
-// (halfway, then flat), each trimmed the same way; a sprite without them is squashed by resampling instead.
+// (halfway, then flat), each trimmed the same way.
 function trimFrame(g) {
   let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
   g.rows.forEach((r, y) => [...r].forEach((ch, x) => {
@@ -765,21 +765,6 @@ function drawNet(p) {
 // the hand-drawn squash frame for this much squash (none below a sliver; halfway, then flat)
 const squashFrame = (spr, amount) => (amount < 0.12 || !spr.squash.length ? null : spr.squash[amount < 0.6 ? 0 : spr.squash.length - 1]);
 
-// a sprite without squash frames, squashed flat with its feet kept on the floor (nearest-pixel resampling, so it stays crisp)
-function drawSquashed(P, spr, pal, amount, tint) {
-  const sy = 1 - (1 - SQUASH.y) * amount, sx = 1 + (SQUASH.x - 1) * amount;
-  const w = spr.rows[0].length, h = spr.rows.length, w2 = Math.round(w * sx), h2 = Math.max(1, Math.round(h * sy));
-  const x0 = Math.round(spr.ax * sx), y0 = -h2, cache = {};
-  for (let ty = 0; ty < h2; ty++) {
-    const row = spr.rows[Math.min(h - 1, Math.floor(ty / sy))];
-    for (let tx = 0; tx < w2; tx++) {
-      const ch = row[Math.min(w - 1, Math.floor(tx / sx))];
-      if (ch === "." || ch === " ") continue;
-      P.dot(x0 + tx, y0 + ty, tint ?? (cache[ch] ??= C(pal[ch])));
-    }
-  }
-}
-
 function drawPlayer(p, P) {
   const spr = p.spr;
   let flip = p.face > 0, pal = spr.pal, ox = 0, oy = 0, tint;
@@ -813,10 +798,7 @@ function drawPlayer(p, P) {
   }
   P.place(Math.round(p.x + ox), Math.round(p.y + oy), flip);
   const pose = squashFrame(spr, p.squash) ?? spr;
-  if (!blinkOff) {
-    if (!spr.squash.length && p.squash > 0.02) drawSquashed(P, spr, pal, p.squash, tint);
-    else P.sprite(pose.rows, pal, pose.ax, pose.ay, { tint });
-  }
+  if (!blinkOff) P.sprite(pose.rows, pal, pose.ax, pose.ay, { tint });
 
   // cheeks spark while charging a zap
   if (a?.type === "zap") {
@@ -838,7 +820,7 @@ function drawPlayer(p, P) {
   }
   // player tag (online: mark which one is you)
   P.place(0, 0);
-  const top = spr.squash.length ? pose.ay : Math.round(spr.ay * (1 - (1 - SQUASH.y) * p.squash)); // shorter while squashed
+  const top = pose.ay; // shorter while squashed
   P.text(tagOf(p), Math.round(p.x), Math.round(p.y + top - 9), p.tag, { align: "center", outline: INK });
   if (net.mode !== "local" && p.id === myId()) P.text("YOU", Math.round(p.x), Math.round(p.y + top - 16), WHITE, { align: "center", outline: INK });
 }
