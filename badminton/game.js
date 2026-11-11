@@ -434,6 +434,9 @@ function followServer() {
   S.x = s.x + s.face * 12;
   S.y = s.y - 30 + Math.sin(game.time * 4) * 1.5;
 }
+// does a shuttle moving from px to (x, y) hit the net? Anything crossing below the tape does, right down to the
+// floor: the mesh ends at NET_BOTTOM but the post goes on down, and nothing may pass under the net
+const hitsNet = (px, x, y) => (px - NET_X) * (x - NET_X) <= 0 && px !== x && y > NET_TOP;
 function updateShuttle(dt) {
   if (S.state === "serve") return followServer();
   if (S.state !== "fly") return;
@@ -446,7 +449,7 @@ function updateShuttle(dt) {
     S.x += S.vx * h;
     S.y += S.vy * h;
     // the net: anything under the tape bounces back off it
-    if ((px - NET_X) * (S.x - NET_X) <= 0 && px !== S.x && S.y > NET_TOP && S.y < NET_BOTTOM) {
+    if (hitsNet(px, S.x, S.y)) {
       S.x = px;
       S.vx = -S.vx * 0.15;
       S.vy = Math.max(S.vy, 0) * 0.4;
@@ -530,7 +533,7 @@ function predictShuttle(maxT = 2.5, from = S) {
       const px = x;
       x += vx * h;
       y += vy * h;
-      if ((px - NET_X) * (x - NET_X) <= 0 && px !== x && y > NET_TOP && y < NET_BOTTOM) (x = px), (vx = -vx * 0.15), (vy = Math.max(vy, 0) * 0.4);
+      if (hitsNet(px, x, y)) (x = px), (vx = -vx * 0.15), (vy = Math.max(vy, 0) * 0.4);
       if (y >= FLOOR) return out.push({ t, x, y: FLOOR, vy, land: true }), out;
     }
     out.push({ t, x, y, vy });
