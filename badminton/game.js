@@ -9,6 +9,9 @@ import * as electrified from "./vendor/pixelfx/src/fx/lightning/electrified.js";
 import * as spinSlash from "./vendor/pixelfx/src/fx/melee/spin-slash.js";
 import * as stunnedFx from "./vendor/pixelfx/src/fx/status/stunned.js";
 import { zigzag, crackle } from "./vendor/pixelfx/src/fx/lightning/_lib.js";
+// the game's own math goes through detmath.js so that two browsers playing online stay identical (rollback.js)
+import { dsin, dcos, datan2, dhypot } from "./detmath.js";
+import { Rollback } from "./rollback.js";
 
 // ---------------------------------------------------------------- world
 const W = 384, H = 216, FLOOR = 196, NET_X = 192, NET_TOP = 160, NET_BOTTOM = 184, COURT_L = 16, COURT_R = 368;
@@ -60,7 +63,6 @@ const [pikaGrid, cpuGrid] = await Promise.all(["./pikachu_grid.json", "./cpu_gri
 const SPR_P1 = makeSprite(pikaGrid);
 const SPR_P2 = { ...SPR_P1, pal: { ...SPR_P1.pal, Y: "#ffc23a", t: "#ffc23a", O: "#dc8c14" } };
 const SPR_CPU = makeSprite(cpuGrid);
-const ACTOR = SPR_P1.actor; // online play only uses the player sprite
 const STEEL = { t: "#d6deee", k: "#2c3246", B: "#8890a6" };
 const CHEEK_ZAP = { R: "#fff7a8", P: "#e8f6ff" };
 const AFTER = { 1: ["#fff3a0", "#d8a030", "#6a4a20"].map(C), 2: ["#ffe08a", "#d08a28", "#64401c"].map(C) };
@@ -75,20 +77,20 @@ const CONTROLS = {
 };
 // online, each player may use either layout on their own keyboard
 const ANY = Object.fromEntries(Object.keys(CONTROLS[1]).map((k) => [k, [...CONTROLS[1][k], ...CONTROLS[2][k]]]));
-const GAME_KEYS = new Set([...Object.values(ANY).flat(), "Enter", "Space", "Escape", "KeyP"]);
-// input sources: this keyboard, and the friend's keyboard arriving over the network (host only)
-const LOCAL = { held: new Set(), pressed: new Set() }, REMOTE = { held: new Set(), pressed: new Set() };
+const START_KEYS = ["Enter", "Space"], PAUSE_KEYS = ["Escape", "KeyP"];
+const GAME_KEYS = new Set([...Object.values(ANY).flat(), ...START_KEYS, ...PAUSE_KEYS]);
+// input sources: this keyboard; online, each player's keys for the frame being played (see rollback.js)
+const LOCAL = { held: new Set(), pressed: new Set() };
+const NET_SRC = [{ held: new Set(), pressed: new Set() }, { held: new Set(), pressed: new Set() }];
 const held = LOCAL.held, pressed = LOCAL.pressed;
 const typing = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
 // one path for real keys and the touch buttons (which press the 1P keys for you)
 function keyDown(code, repeat = false) {
   if (!repeat) pressed.add(code);
   held.add(code);
-  if (net.mode === "guest" && !repeat && GAME_KEYS.has(code)) sendCtl({ t: "k", c: code, d: 1 });
 }
 function keyUp(code) {
   held.delete(code);
-  if (net.mode === "guest" && GAME_KEYS.has(code)) sendCtl({ t: "k", c: code, d: 0 });
 }
 addEventListener("keydown", (e) => {
   if (typing(e)) return;
@@ -96,39 +98,66 @@ addEventListener("keydown", (e) => {
   keyDown(e.code, e.repeat);
 });
 addEventListener("keyup", (e) => keyUp(e.code));
-addEventListener("blur", () => {
-  held.clear();
-  if (net.mode === "guest") sendCtl({ t: "rel" });
-});
+addEventListener("blur", () => held.clear());
 const pHeld = (p, codes) => codes.some((c) => p.src.held.has(c));
 const pPressed = (p, codes) => codes.some((c) => p.src.pressed.has(c));
-// menu keys (start, pause) count from either keyboard
-const anyPressed = (codes) => codes.some((c) => LOCAL.pressed.has(c) || (net.mode === "host" && REMOTE.pressed.has(c)));
+// menu keys (start, pause) count from either player
+const anyPressed = (codes) => (net.rb ? NET_SRC : [LOCAL]).some((s) => codes.some((c) => s.pressed.has(c)));
+
+// Online, one player's input for one frame is 16 bits: the seven game keys held (bits 0-6), the same seven
+// pressed this frame (bits 8-14), start pressed (bit 7) and pause pressed (bit 15). Either keyboard layout
+// counts; inside the game both players then use the 1P key names.
+const INPUT_KEYS = ["left", "right", "up", "down", "basic", "zap", "quick"];
+function readLocalInput() {
+  let v = 0;
+  INPUT_KEYS.forEach((k, i) => {
+    if (ANY[k].some((c) => held.has(c))) v |= 1 << i;
+    if (ANY[k].some((c) => pressed.has(c))) v |= 1 << (i + 8);
+  });
+  if (START_KEYS.some((c) => pressed.has(c))) v |= 0x80;
+  if (PAUSE_KEYS.some((c) => pressed.has(c))) v |= 0x8000;
+  pressed.clear();
+  return v;
+}
+function decodeInput(src, v) {
+  src.held.clear();
+  src.pressed.clear();
+  INPUT_KEYS.forEach((k, i) => {
+    if (v & (1 << i)) src.held.add(CONTROLS[1][k][0]);
+    if (v & (1 << (i + 8))) src.pressed.add(CONTROLS[1][k][0]);
+  });
+  if (v & 0x80) src.pressed.add(START_KEYS[0]);
+  if (v & 0x8000) src.pressed.add(PAUSE_KEYS[0]);
+}
 
 // ---------------------------------------------------------------- state
 const makePlayer = (id) => ({
   id, ctl: CONTROLS[id], src: LOCAL, spr: id === 1 ? SPR_P1 : SPR_P2, tag: C(id === 1 ? "#ff6b5b" : "#5bb0ff"),
   x: 0, y: FLOOR, vx: 0, vy: 0, face: id === 1 ? 1 : -1, ground: true,
   act: null, cd: { zap: 0, tail: 0, quick: 0 }, quickT: 0, quickDir: null,
-  stun: 0, stunKind: null, knocked: false, knockT: 0, iframes: 0, statusFx: null,
+  stun: 0, stunKind: null, stunN: 0, knocked: false, knockT: 0, iframes: 0,
   trail: [], score: 0, squash: 0,
 });
 const P1 = makePlayer(1), P2 = makePlayer(2), PLAYERS = [P1, P2];
 const other = (p) => (p === P1 ? P2 : P1);
 const S = { x: 0, y: 0, vx: 0, vy: 0, state: "serve", last: null, smash: 0, trail: [] };
 
-const game = { state: "title", server: P1, timer: 0, msg: null, paused: false, winner: null, time: 0, freeze: 0, shakeT: 0, shakeA: 0 };
+// rng: the game's own random numbers (who serves first, each bolt's look), kept in the state so that both
+// browsers draw the same ones online. Effects and dust are only for show and use Math.random.
+const game = { state: "title", server: P1, timer: 0, msg: null, paused: false, winner: null, pointWinner: null, time: 0, freeze: 0, shakeT: 0, shakeA: 0, rng: (Math.random() * 2 ** 32) >>> 0 };
 const effects = [], bolts = [], dust = [], marks = [];
+function srand() {
+  game.rng = (Math.imul(game.rng, 1664525) + 1013904223) >>> 0;
+  return game.rng / 2 ** 32;
+}
 
 function resetRally(server) {
-  net.p2Epoch++; // positions reset: 2P's own prediction must restart from here
   game.server = server;
   P1.x = 96; P2.x = 288;
   for (const p of PLAYERS) {
     Object.assign(p, { y: FLOOR, vx: 0, vy: 0, ground: true, act: null, quickT: 0, stun: 0, stunKind: null, knocked: false, iframes: 0, trail: [] });
     p.cd = { zap: 0, tail: 0, quick: 0 };
     p.face = p === P1 ? 1 : -1;
-    clearStatus(p);
   }
   bolts.length = 0;
   Object.assign(S, { state: "serve", vx: 0, vy: 0, last: null, smash: 0, trail: [] });
@@ -139,9 +168,9 @@ function resetRally(server) {
 function newGame() {
   P1.score = P2.score = 0;
   marks.length = 0;
-  effects.length = 0;
+  if (!fxLog.replay) effects.length = 0;
   game.winner = null;
-  resetRally(Math.random() < 0.5 ? P1 : P2);
+  resetRally(srand() < 0.5 ? P1 : P2);
 }
 function say(text, color = WHITE, dur = 1, y = 52) {
   game.msg = { text, color, t: 0, dur, y };
@@ -155,18 +184,40 @@ function shake(a, t) {
 }
 
 // ---------------------------------------------------------------- effects
+// Effects and dust are only for show: they are not part of the game state, and each browser draws its own.
 const MODS = { hitSpark, critHit, bluntHit, zapHit, electrified, spinSlash, stunnedFx };
 const MOD_NAME = new Map(Object.entries(MODS).map(([k, v]) => [v, k]));
-let fxId = 0;
-function spawn(mod, opts, extra = {}) {
-  const o = { seed: (Math.random() * 1e6) | 0, ...opts };
-  const e = { fx: createFx(mod, o), id: ++fxId, ...extra };
+function addFx(mod, opts, extra = {}) {
+  const e = { fx: createFx(mod, { seed: (Math.random() * 1e6) | 0, ...opts }), ...extra };
   effects.push(e);
-  // the friend's screen builds the same effect from the same seed
-  if (net.mode === "host") sendCtl({ t: "fx", id: e.id, m: MOD_NAME.get(mod), o: { ...o, actor: o.actor ? 1 : 0 } });
+  return e;
+}
+// Online, a frame may be played more than once (rollback.js replays frames when the other player's keys turn
+// out different from the guess). An effect started in a frame must start only once however often the frame is
+// replayed, and one from a frame that turned out differently must go: so each is filed under its frame and its
+// place in that frame's order.
+const fxLog = { on: false, frame: 0, replay: false, to: 0, count: new Map(), seen: new Map() };
+function fxOnce(kind) {
+  if (!fxLog.on) return { fresh: true };
+  const k = `${fxLog.frame}:${kind}`, n = fxLog.count.get(k) ?? 0;
+  fxLog.count.set(k, n + 1);
+  const key = `${k}:${n}`, had = fxLog.seen.get(key);
+  if (had) return (had.keep = true), { fresh: false, had };
+  const rec = { f: fxLog.frame, keep: true, e: null };
+  fxLog.seen.set(key, rec);
+  return { fresh: true, rec };
+}
+function spawn(mod, opts, extra = {}) {
+  const once = fxOnce(MOD_NAME.get(mod));
+  if (!once.fresh) return once.had.e;
+  const e = addFx(mod, opts, extra);
+  if (once.rec) once.rec.e = e;
+  // started in a frame that is being replayed: it is already that many frames old
+  if (fxLog.replay) for (let k = Math.min(fxLog.to - fxLog.frame - 1, 12); k > 0; k--) e.fx.update(DT);
   return e;
 }
 function puff(x, y, n, dir = 0, color = "#b8a890") {
+  if (!fxOnce("puff").fresh) return;
   for (let i = 0; i < n; i++)
     dust.push({
       x: x + (Math.random() - 0.5) * 8, y: y - Math.random() * 2,
@@ -174,11 +225,39 @@ function puff(x, y, n, dir = 0, color = "#b8a890") {
       life: 0, max: 0.25 + Math.random() * 0.25, c: C(color), r: Math.random() < 0.4 ? 1 : 0,
     });
 }
-function clearStatus(p) {
-  if (p.statusFx) {
-    const i = effects.indexOf(p.statusFx);
+// a replay is about to play frames from..to-1 again: anything they start is checked off as it comes round again,
+// and whatever does not come round again did not happen after all
+function fxBeforeReplay(from, to) {
+  for (const r of fxLog.seen.values()) if (r.f >= from) r.keep = false;
+  Object.assign(fxLog, { replay: true, to });
+}
+function fxAfterReplay(from) {
+  fxLog.replay = false;
+  for (const [key, r] of fxLog.seen) {
+    if (r.f < from || r.keep) continue;
+    fxLog.seen.delete(key);
+    const i = r.e ? effects.indexOf(r.e) : -1;
     if (i >= 0) effects.splice(i, 1);
-    p.statusFx = null;
+  }
+}
+function fxForget(before) {
+  for (const [key, r] of fxLog.seen) if (r.f < before) fxLog.seen.delete(key);
+}
+// The effects wrapped round a stunned player (crackling after a zap, dizzy after Iron Tail) follow from the
+// state: one per stun (stunN counts them), gone when the stun ends. So a replay cannot leave one behind.
+const statusFx = new Map(); // player -> { key, e }
+function syncStatus() {
+  for (const p of PLAYERS) {
+    const kind = p.stun > 0 && p.stunKind === "zap" ? "zap" : p.stun > 0 && p.stunKind === "tail" && !p.knocked ? "tail" : null;
+    const key = kind && `${kind}:${p.stunN}`, cur = statusFx.get(p);
+    if ((cur?.key ?? null) === key) continue;
+    if (cur) {
+      const i = effects.indexOf(cur.e);
+      if (i >= 0) effects.splice(i, 1);
+      statusFx.delete(p);
+    }
+    if (kind === "zap") statusFx.set(p, { key, e: addFx(electrified, { x: p.x, y: p.y, actor: p.spr.actor, palette: PAL.volt, sparks: ["#ffffff", "#fff6c4", "#ffe066", "#f0b424"] }, { follow: p }) });
+    else if (kind === "tail") statusFx.set(p, { key, e: addFx(stunnedFx, { x: p.x, y: p.y, actor: p.spr.actor }, { follow: p }) });
   }
 }
 
@@ -191,12 +270,11 @@ function circleBox(cx, cy, r, b) {
 const canBeHit = (o) => !o.knocked && o.iframes <= 0;
 
 function stunPlayer(o, kind, from) {
-  if (o === P2) net.p2Epoch++; // the host moves 2P now (knockback, stun): its prediction yields to the host
   o.act = null;
   o.quickT = 0;
   o.trail = [];
-  clearStatus(o);
   o.stunKind = kind;
+  o.stunN++; // (a zap's crackle comes from syncStatus)
   if (kind === "basic") {
     o.stun = STUN.basic;
     o.vx = from.face * 170;
@@ -204,7 +282,6 @@ function stunPlayer(o, kind, from) {
     o.stun = STUN.zap;
     o.vx = 0;
     if (!o.ground) o.vy = Math.max(o.vy, 0);
-    o.statusFx = spawn(electrified, { x: o.x, y: o.y, actor: o.spr.actor, palette: PAL.volt, sparks: ["#ffffff", "#fff6c4", "#ffe066", "#f0b424"] }, { follow: o });
   } else if (kind === "tail") {
     // knocked flying first; the 0.5 s stun starts on landing
     o.knocked = true;
@@ -224,7 +301,7 @@ function shotVel(face, x, y, kind, dir) {
     sp = 560;
     ang = 20;
     const ahead = (NET_X - x) * face; // > 0 when the net is still in front of the shuttle
-    if (ahead > 4) ang = Math.min(20, (Math.atan2(NET_TOP - 10 - y, ahead) * 180) / Math.PI - 3);
+    if (ahead > 4) ang = Math.min(20, (datan2(NET_TOP - 10 - y, ahead) * 180) / Math.PI - 3);
     ang = Math.max(ang, -40);
   } else {
     // clears, lobs and drives aim ~30 px inside the far baseline: speed fitted in a sim to distance and height
@@ -235,7 +312,7 @@ function shotVel(face, x, y, kind, dir) {
     else (sp = clamp(-7 + 1.714 * dist - 0.575 * h, 250, 560)), (ang = -52);
   }
   const r = (ang * Math.PI) / 180;
-  return { vx: Math.cos(r) * sp * face, vy: Math.sin(r) * sp, r };
+  return { vx: dcos(r) * sp * face, vy: dsin(r) * sp, r };
 }
 
 function hitShuttle(p, kind) {
@@ -290,7 +367,6 @@ const inPlay = (p) => (game.state !== "title" && game.state !== "over") || gloat
 
 function updatePlayer(p, dt) {
   const o = other(p), c = p.ctl, dirX = (pHeld(p, c.right) ? 1 : 0) - (pHeld(p, c.left) ? 1 : 0);
-  const rep = guestMove(p); // online host: 2P moves where the guest's own (predicted) game says it is
   for (const k in p.cd) p.cd[k] = Math.max(0, p.cd[k] - dt);
   p.iframes = Math.max(0, p.iframes - dt);
 
@@ -305,26 +381,22 @@ function updatePlayer(p, dt) {
       p.stun = 0;
       p.stunKind = null;
       p.iframes = 0.25;
-      clearStatus(p);
     }
   }
 
   if (free && inPlay(p)) {
-    if (rep) p.face = rep.f;
-    else if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
-    if (!rep && pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
+    if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
+    if (pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
     else if (!p.act && p.quickT <= 0) {
       if (pPressed(p, c.zap) && p.cd.zap <= 0) startAct(p, "zap");
       else if (pPressed(p, c.basic)) startAct(p, "basic");
     }
-    if (!rep && pPressed(p, c.up) && p.ground && p.quickT <= 0 && !(p.act && p.act.type === "tail")) {
+    if (pPressed(p, c.up) && p.ground && p.quickT <= 0 && !(p.act && p.act.type === "tail")) {
       p.vy = -JUMP_V;
       p.ground = false;
       puff(p.x, FLOOR, 3);
     }
-    if (rep) {
-      // moved by the guest's report below
-    } else if (p.quickT > 0) {
+    if (p.quickT > 0) {
       p.quickT -= dt;
       if (p.quickDir === "up") p.vx = dirX * RUN * 1.2;
     } else {
@@ -333,22 +405,17 @@ function updatePlayer(p, dt) {
     }
   }
 
-  // physics (or, for an online 2P moving freely, just the position its own game reported)
-  if (rep) {
-    Object.assign(p, { x: rep.x, y: rep.y, vx: rep.vx, vy: rep.vy, ground: !!rep.g, quickT: rep.q, quickDir: rep.qd });
-    p.cd.quick = rep.cq;
-  } else {
-    const dashing = p.quickT > 0 && p.quickDir !== "up";
-    if (!dashing) p.vy += GRAV * dt;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    if (p.y >= FLOOR) {
-      if (!p.ground && p.vy > 260) puff(p.x, FLOOR, 4);
-      p.y = FLOOR;
-      p.vy = 0;
-      p.ground = true;
-    } else p.ground = false;
-  }
+  // physics
+  const dashing = p.quickT > 0 && p.quickDir !== "up";
+  if (!dashing) p.vy += GRAV * dt;
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+  if (p.y >= FLOOR) {
+    if (!p.ground && p.vy > 260) puff(p.x, FLOOR, 4);
+    p.y = FLOOR;
+    p.vy = 0;
+    p.ground = true;
+  } else p.ground = false;
   if (p.x < 12 || p.x > W - 12) {
     p.x = clamp(p.x, 12, W - 12);
     if (p.knocked) p.vx *= -0.3;
@@ -364,9 +431,8 @@ function updatePlayer(p, dt) {
     p.knocked = false;
     p.stun = STUN.tail;
     p.stunKind = "tail";
+    p.stunN++; // (the dizzy stars come from syncStatus)
     puff(p.x, FLOOR, 7);
-    clearStatus(p);
-    p.statusFx = spawn(stunnedFx, { x: p.x, y: p.y, actor: p.spr.actor }, { follow: p });
   }
 
   // hold Down on the ground to squash flat (eased in and out; just for show)
@@ -384,7 +450,7 @@ function updatePlayer(p, dt) {
   a.t += dt;
   if (a.type === "basic" && a.t >= BASIC.on && a.t <= BASIC.off) {
     const hx = p.x + p.face * 12, hy = p.y - 18;
-    if (!a.hitS && canHitShuttle(p) && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS) {
+    if (!a.hitS && canHitShuttle(p) && dhypot(S.x - hx, S.y - hy) < BASIC.reachS) {
       a.hitS = true;
       // in the air the swing turns into Iron Tail (a smash), except on the serve: a jump serve is a normal hit
       if (p.ground || S.state === "serve") hitShuttle(p, "basic");
@@ -405,7 +471,7 @@ function updatePlayer(p, dt) {
     }
     if (a.t >= TAIL.on && a.t <= TAIL.off) {
       const hx = p.x + p.face * 14, hy = p.y - 16;
-      if (!a.hitS && canHitShuttle(p) && Math.hypot(S.x - hx, S.y - hy) < TAIL.reachS) ((a.hitS = true), hitShuttle(p, "tail"));
+      if (!a.hitS && canHitShuttle(p) && dhypot(S.x - hx, S.y - hy) < TAIL.reachS) ((a.hitS = true), hitShuttle(p, "tail"));
       if (!a.hitP && canBeHit(o) && circleBox(p.x + p.face * 16, p.y - 10, TAIL.reachP, hurtbox(o))) {
         a.hitP = true;
         stunPlayer(o, "tail", p);
@@ -416,7 +482,7 @@ function updatePlayer(p, dt) {
     }
   } else if (a.type === "zap" && a.t >= ZAP.fire && !a.fired) {
     a.fired = true;
-    bolts.push({ owner: p, x: p.x + p.face * 14, y: p.y - 15, vx: p.face * ZAP.speed, life: 1.6, seed: (Math.random() * 1e6) | 0 });
+    bolts.push({ owner: p, x: p.x + p.face * 14, y: p.y - 15, vx: p.face * ZAP.speed, life: 1.6, seed: (srand() * 1e6) | 0 });
   }
   if (a.t >= (a.type === "basic" ? BASIC.dur : a.type === "tail" ? TAIL.dur : ZAP.dur)) p.act = null;
 }
@@ -432,7 +498,7 @@ const canHitShuttle = (p) => S.state === "fly" || (S.state === "serve" && game.s
 function followServer() {
   const s = game.server;
   S.x = s.x + s.face * 12;
-  S.y = s.y - 30 + Math.sin(game.time * 4) * 1.5;
+  S.y = s.y - 30 + dsin(game.time * 4) * 1.5;
 }
 // does a shuttle moving from px to (x, y) hit the net? Anything crossing below the tape does, right down to the
 // floor: the mesh ends at NET_BOTTOM but the post goes on down, and nothing may pass under the net
@@ -442,7 +508,7 @@ function updateShuttle(dt) {
   if (S.state !== "fly") return;
   const n = 4, h = dt / n;
   for (let i = 0; i < n; i++) {
-    const v = Math.hypot(S.vx, S.vy);
+    const v = dhypot(S.vx, S.vy);
     S.vx += -SH_K * v * S.vx * h;
     S.vy += (SH_G - SH_K * v * S.vy) * h;
     const px = S.x;
@@ -527,7 +593,7 @@ function predictShuttle(maxT = 2.5, from = S) {
   let { x, y, vx, vy } = from;
   for (let t = DT; t <= maxT; t += DT) {
     for (let k = 0; k < 4; k++) {
-      const v = Math.hypot(vx, vy);
+      const v = dhypot(vx, vy);
       vx += -SH_K * v * vx * h;
       vy += (SH_G - SH_K * v * vy) * h;
       const px = x;
@@ -722,25 +788,43 @@ function aiStep() {
   if (ai.dodged.size > 50) ai.dodged.clear();
 }
 
-function step(dt) {
-  if (game.hold) return; // debug: freeze the world for screenshots
+// One frame of the game itself: everything in the state (saveState), nothing that is only for show. Online it may
+// run again for a frame already played (see rollback.js), so it must give the same result from the same state and
+// keys in any browser: no Math.random (srand), and detmath.js for sin, cos, atan2 and hypot.
+// Returns true when the world moved (not paused or in a hit-stop).
+function simStep(dt) {
+  if (game.hold) return false; // debug: freeze the world for screenshots
   game.time += dt;
-  if (anyPressed(["Escape", "KeyP"]) && (game.state === "serve" || game.state === "rally" || game.state === "point")) game.paused = !game.paused;
-  if (game.paused) return;
-  if ((game.state === "title" || game.state === "over") && anyPressed(["Enter", "Space"])) newGame();
+  if (anyPressed(PAUSE_KEYS) && (game.state === "serve" || game.state === "rally" || game.state === "point")) game.paused = !game.paused;
+  if (game.paused) return false;
+  if ((game.state === "title" || game.state === "over") && anyPressed(START_KEYS)) newGame();
 
   if (game.msg && (game.msg.t += dt) > game.msg.dur) game.msg = null;
   game.shakeT = Math.max(0, game.shakeT - dt);
   if (game.freeze > 0) {
     game.freeze -= dt;
-    return;
+    return false;
   }
 
   if (ai.on) aiStep();
   for (const p of PLAYERS) updatePlayer(p, dt);
   updateShuttle(dt);
   updateBolts(dt);
+  for (const m of marks) m.t += dt;
+  for (let i = marks.length - 1; i >= 0; i--) if (marks[i].t > 1.6) marks.splice(i, 1);
 
+  if (game.state === "point" && (game.timer -= dt) <= 0) {
+    const w = game.pointWinner;
+    if (w.score >= WIN) {
+      game.state = "over";
+      game.winner = w;
+      say(`${w.id}P WINS!`, w.tag, 1e9, 70);
+    } else resetRally(w);
+  }
+  return true;
+}
+// effects and dust: they move with the world (and freeze with it in a hit-stop)
+function showStep(dt) {
   for (const e of effects) {
     if (e.follow) {
       e.fx.options.x = Math.round(e.follow.x);
@@ -753,17 +837,11 @@ function step(dt) {
   for (let i = effects.length - 1; i >= 0; i--) if (effects[i].fx.done()) effects.splice(i, 1);
   for (const d of dust) ((d.life += dt), (d.x += d.vx * dt), (d.y += d.vy * dt), (d.vx *= 1 - 4 * dt), (d.vy += 40 * dt));
   for (let i = dust.length - 1; i >= 0; i--) if (dust[i].life >= dust[i].max) dust.splice(i, 1);
-  for (const m of marks) m.t += dt;
-  for (let i = marks.length - 1; i >= 0; i--) if (marks[i].t > 1.6) marks.splice(i, 1);
-
-  if (game.state === "point" && (game.timer -= dt) <= 0) {
-    const w = game.pointWinner;
-    if (w.score >= WIN) {
-      game.state = "over";
-      game.winner = w;
-      say(`${w.id}P WINS!`, w.tag, 1e9, 70);
-    } else resetRally(w);
-  }
+}
+// one whole frame, as played on one device
+function step(dt) {
+  if (simStep(dt)) showStep(dt);
+  syncStatus();
 }
 
 // ---------------------------------------------------------------- drawing
@@ -955,40 +1033,54 @@ function drawOverlay(P) {
     P.rect(W / 2 - 60, 82, 120, 34, INK);
     P.text("PAUSED", W / 2, 92, C("#ffffff"), { font: "big", scale: 2, align: "center", outline: INK });
   }
+  // online: the other side has gone quiet (their tab is hidden, or the connection stalled) and the game waits
+  if (net.rb?.waiting(performance.now(), 400)) {
+    P.rect(W / 2 - 50, 120, 100, 15, INK);
+    if (Math.floor(performance.now() / 400) % 2) P.text(net.mode === "guest" ? "WAITING FOR 1P..." : "WAITING FOR 2P...", W / 2, 124, C("#fff3a0"), { align: "center", outline: INK });
+  }
 }
 
 function render() {
   clearFrame(frame);
   let P = painterFor(frame);
-  for (const e of effects) if (e.shown !== false) e.fx.draw(frame, "back");
+  for (const e of effects) e.fx.draw(frame, "back");
   P = painterFor(frame);
   drawNet(P);
   for (const d of dust) P.dot(d.x, d.y, d.c, 1 - d.life / d.max);
   for (const p of PLAYERS) drawPlayer(p, P);
   drawShuttle(P);
   for (const b of bolts) drawBolt(P, b);
-  for (const e of effects) if (e.shown !== false) e.fx.draw(frame, "front");
+  for (const e of effects) e.fx.draw(frame, "front");
   P = painterFor(frame);
   drawHud(P);
   drawOverlay(P);
 }
 
 // ---------------------------------------------------------------- online (PeerJS: browser-to-browser WebRTC)
-// The host's browser runs the game. The guest sends key presses on a reliable "ctl" channel and draws the
-// snapshots the host streams on an unreliable "state" channel. Effects are sent once (with their seed) on "ctl",
-// and snapshots carry only their clock and position, so both screens show the same sparks.
-const ROOM_PREFIX = "pika-badminton-v1-";
-const net = { mode: "local", peer: null, ctl: null, state: null, code: null, seq: 0, lastSeq: -1, lastSend: 0, ping: null, pinger: 0, p2Epoch: 0, p2Reports: [], p2Offs: [] };
-const fxById = new Map();
+// Rollback netcode (rollback.js). Both browsers run the whole game, and only key presses travel between them.
+// Each side plays its own keys at once (or a frame or two later on a slow link) and guesses the other player's
+// (the keys they held last); when the real ones arrive and differ, it rewinds to that frame and plays forward
+// again, all before the next screen is drawn. Nobody waits for the network to see their own Pikachu move or
+// their own swing land, and both screens show the same game, neither one behind the other.
+// PeerJS sets up the connection and its reliable "ctl" channel, which carries the room's few messages (ready,
+// start, resync, NAT). The game's packets go on a second channel of the same connection that we open ourselves
+// ("negotiated", so PeerJS is not involved): unordered and never retransmitted, so a lost packet never holds up
+// the ones behind it. Each packet repeats every input the other side has not confirmed yet instead.
+const ROOM_PREFIX = "pika-badminton-v2-"; // v2: rollback (a v1 page and a v2 page cannot play each other)
+const GAME_CHANNEL = { negotiated: true, id: 42, ordered: false, maxRetransmits: 0 };
+const net = { mode: "local", peer: null, ctl: null, game: null, gameReady: false, peerReady: false, viaCtl: false, rb: null, code: null, resyncAt: 0, pingShown: 0 };
 const myId = () => (net.mode === "guest" ? 2 : 1);
 const sendCtl = (msg) => net.ctl?.open && net.ctl.send(msg);
+// for testing: "?delay=0" fixes the input delay (frames); "?netsim=lag:40,jitter:20,loss:0.05,spikes:0.01" makes
+// this side's game packets late (ms), uneven, lost, and now and then (spikes: the chance per packet) 100-250 ms late
+const QUERY = new URLSearchParams(location.search);
+const FIXED_DELAY = QUERY.has("delay") ? Math.max(0, Math.min(8, Number(QUERY.get("delay")) | 0)) : undefined;
+const NETSIM = QUERY.has("netsim") ? { lag: 0, jitter: 0, loss: 0, spikes: 0, ...Object.fromEntries(QUERY.get("netsim").split(",").map((kv) => kv.split(":")).map(([k, v]) => [k, Number(v) || 0])) } : null;
 
 function setMode(mode) {
   net.mode = mode;
-  REMOTE.held.clear();
-  REMOTE.pressed.clear();
   if (mode === "local") (P1.ctl = CONTROLS[1]), (P2.ctl = CONTROLS[2]), (P1.src = P2.src = LOCAL);
-  else (P1.ctl = P2.ctl = ANY), (P1.src = LOCAL), (P2.src = REMOTE);
+  else (P1.ctl = P2.ctl = CONTROLS[1]), (P1.src = NET_SRC[0]), (P2.src = NET_SRC[1]);
   // the AI only plays offline: going online sends it home, coming back brings it back if it was on
   if (mode !== "local") (P2.spr = SPR_P2), (ai.wasOn = ai.wasOn || ai.on), (ai.on = false);
   else if (ai.wasOn) (ai.wasOn = false), setAI(ai.level);
@@ -996,7 +1088,7 @@ function setMode(mode) {
 }
 function toTitle() {
   effects.length = 0;
-  fxById.clear();
+  statusFx.clear();
   bolts.length = 0;
   dust.length = 0;
   marks.length = 0;
@@ -1011,10 +1103,9 @@ function makeCode() {
   return Array.from({ length: 5 }, () => A[(Math.random() * A.length) | 0]).join("");
 }
 function leave(silent) {
-  clearInterval(net.pinger);
-  try { net.ctl?.close(); net.state?.close(); net.peer?.destroy(); } catch {}
-  Object.assign(net, { peer: null, ctl: null, state: null, code: null, ping: null, lastSeq: -1, route: null, peerNat: null, connText: null, p2Reports: [], p2Offs: [] });
-  resetGuest();
+  try { net.game?.close(); net.ctl?.close(); net.peer?.destroy(); } catch {}
+  stopSession();
+  Object.assign(net, { peer: null, ctl: null, game: null, gameReady: false, peerReady: false, viaCtl: false, code: null, route: null, peerNat: null, connText: null });
   const wasOnline = net.mode !== "local";
   setMode("local");
   if (wasOnline) toTitle();
@@ -1025,35 +1116,185 @@ function onDisconnect() {
   leave(true);
   ui.status("연결이 끊겼어요. 로컬 모드로 돌아왔어요.", "warn");
 }
-function startPinging() {
-  clearInterval(net.pinger);
-  net.pinger = setInterval(() => sendCtl({ t: "ping", ts: performance.now() }), 1000);
-}
 function onCtl(d) {
-  if (d.t === "k") {
-    if (d.d) (REMOTE.held.add(d.c), REMOTE.pressed.add(d.c));
-    else REMOTE.held.delete(d.c);
-  } else if (d.t === "rel") REMOTE.held.clear();
-  else if (d.t === "ping") sendCtl({ t: "pong", ts: d.ts });
-  else if (d.t === "pong") {
-    net.ping = Math.round(performance.now() - d.ts);
-    ui.ping(net.ping);
-  } else if (d.t === "fx" && net.mode === "guest") {
-    const mod = MODS[d.m];
-    if (!mod) return;
-    const o = { ...d.o };
-    if (o.actor) o.actor = ACTOR;
-    else delete o.actor;
-    const e = { fx: createFx(mod, o), id: d.id };
-    effects.push(e);
-    fxById.set(d.id, e);
-  } else if (d.t === "nat") {
+  if (d.t === "ready") {
+    net.peerReady = true;
+    if (d.viaCtl) net.viaCtl = true; // their game channel never opened: send over ctl too, or they would not hear us
+    maybeStart();
+  } else if (d.t === "start" && net.mode === "guest" && !net.rb) startSession(d.seed);
+  else if (d.t === "resync" && net.mode === "guest") net.rb?.resync(d.f, d.s, d.gen);
+  else if (d.t === "g" && Array.isArray(d.d)) net.rb?.receive(new Uint8Array(d.d).buffer);
+  else if (d.t === "nat") {
     net.peerNat = String(d.v).slice(0, 60);
     refreshConn();
   } else if (d.t === "full") {
     leave(true);
     ui.status("그 방은 이미 두 명이 차 있어요.", "warn");
   }
+}
+
+// ---- the game channel: opened on the ctl connection by both sides at once (same id), no signaling needed
+function openGameChannel(conn) {
+  let dc = null;
+  try {
+    dc = conn.peerConnection.createDataChannel("game", GAME_CHANNEL);
+  } catch (err) {
+    console.warn("[net] could not open the game channel:", err);
+  }
+  if (dc) {
+    net.game = dc;
+    dc.binaryType = "arraybuffer";
+    dc.onopen = () => gameChannelReady(conn);
+    dc.onmessage = (e) => net.ctl === conn && net.rb?.receive(e.data);
+    if (dc.readyState === "open") gameChannelReady(conn);
+  }
+  // not open after 3 s: send the game over ctl instead (reliable and ordered, so worse when packets are lost)
+  setTimeout(() => {
+    if (net.ctl !== conn || net.gameReady) return;
+    console.warn("[net] the game channel did not open; the game goes over ctl");
+    net.viaCtl = true;
+    gameChannelReady(conn);
+  }, 3000);
+}
+function gameChannelReady(conn) {
+  if (net.ctl !== conn || net.gameReady) return;
+  net.gameReady = true;
+  sendCtl({ t: "ready", viaCtl: net.viaCtl });
+  maybeStart();
+}
+// the host starts the match once both channels are up: the same seed on both sides, from frame 0
+function maybeStart() {
+  if (net.mode !== "host" || net.rb || !net.gameReady || !net.peerReady) return;
+  const seed = (Math.random() * 2 ** 32) >>> 0;
+  sendCtl({ t: "start", seed });
+  startSession(seed);
+}
+function sendGame(buf) {
+  if (NETSIM) {
+    const spike = Math.random() < NETSIM.spikes ? 100 + Math.random() * 150 : 0;
+    if (Math.random() >= NETSIM.loss) workerTimeout(NETSIM.lag + Math.random() * NETSIM.jitter + spike, () => sendGameNow(buf));
+  } else sendGameNow(buf);
+}
+function sendGameNow(buf) {
+  if (net.viaCtl) return void sendCtl({ t: "g", d: Array.from(new Uint8Array(buf)) });
+  // a packet repeats everything the last one had: if the link is backed up, skip it rather than queue it
+  if (net.game?.readyState === "open" && net.game.bufferedAmount < 16384) net.game.send(buf);
+}
+
+// ---- the match: both sides start from the same state and seed at frame 0
+function startSession(seed) {
+  for (const p of PLAYERS) {
+    const { ctl, src, spr, tag } = p;
+    Object.assign(p, makePlayer(p.id), { ctl, src, spr, tag });
+  }
+  Object.assign(game, { state: "title", server: P1, timer: 0, msg: null, paused: false, winner: null, pointWinner: null, time: 0, freeze: 0, shakeT: 0, shakeA: 0, rng: seed >>> 0 });
+  toTitle();
+  held.clear();
+  pressed.clear();
+  fxLog.seen.clear();
+  Object.assign(fxLog, { on: true, replay: false });
+  net.rb = new Rollback({
+    me: net.mode === "guest" ? 1 : 0,
+    now: () => performance.now(),
+    readInput: readLocalInput,
+    step: playFrame,
+    save: saveState,
+    load: loadState,
+    hash: hashState,
+    send: sendGame,
+    beforeReplay: fxBeforeReplay,
+    afterReplay: fxAfterReplay,
+    onDesync,
+    delay: FIXED_DELAY,
+  });
+  console.info(`[net] match started (${net.mode}, seed ${seed})`);
+}
+function stopSession() {
+  net.rb = null;
+  fxLog.on = false;
+  fxLog.seen.clear();
+}
+// one frame with both players' keys (replay: played again after a wrong guess; nothing new to show then)
+function playFrame(a, b, frame, replay) {
+  decodeInput(NET_SRC[0], a);
+  decodeInput(NET_SRC[1], b);
+  fxLog.frame = frame;
+  fxLog.count.clear();
+  const moved = simStep(DT);
+  if (replay) return;
+  if (moved) showStep(DT);
+  syncStatus();
+  if (frame % 60 === 0) fxForget(frame - 120);
+}
+// The two games disagreed (should never happen: same code, same keys, same math). The host's game counts: it
+// sends its state, and the guest rewinds to it and plays on from there.
+function onDesync(frame) {
+  console.warn(`[net] desync found at frame ${frame}`);
+  if (net.mode !== "host" || performance.now() - net.resyncAt < 1000) return;
+  const fin = net.rb.finalState();
+  if (!fin) return;
+  net.resyncAt = performance.now();
+  sendCtl({ t: "resync", gen: net.rb.bumpGen(), f: fin.f, s: fin.s });
+}
+
+// ---- the game state: everything simStep reads and changes, as plain data (players as ids)
+const PLAYER_KEYS = ["x", "y", "vx", "vy", "face", "ground", "quickT", "quickDir", "stun", "stunKind", "stunN", "knocked", "knockT", "iframes", "score", "squash"];
+const byId = (id) => (id === 1 ? P1 : id === 2 ? P2 : null), idOf = (p) => p?.id ?? 0;
+function saveState() {
+  return {
+    p: PLAYERS.map((p) => {
+      const o = { act: p.act && { ...p.act }, cd: { ...p.cd }, trail: p.trail.map((g) => ({ ...g })) };
+      for (const k of PLAYER_KEYS) o[k] = p[k];
+      return o;
+    }),
+    s: { x: S.x, y: S.y, vx: S.vx, vy: S.vy, state: S.state, last: idOf(S.last), smash: S.smash, trail: S.trail.map((t) => ({ ...t })) },
+    g: {
+      state: game.state, server: idOf(game.server), timer: game.timer, msg: game.msg && { ...game.msg }, paused: game.paused, winner: idOf(game.winner),
+      pointWinner: idOf(game.pointWinner), time: game.time, freeze: game.freeze, shakeT: game.shakeT, shakeA: game.shakeA, rng: game.rng,
+    },
+    b: bolts.map((b) => ({ ...b, owner: b.owner.id })),
+    m: marks.map((m) => ({ ...m })),
+  };
+}
+function loadState(st) {
+  st.p.forEach((o, i) => {
+    const p = PLAYERS[i];
+    for (const k of PLAYER_KEYS) p[k] = o[k];
+    p.act = o.act && { ...o.act };
+    p.cd = { ...o.cd };
+    p.trail = o.trail.map((g) => ({ ...g }));
+  });
+  const s = st.s, g = st.g;
+  Object.assign(S, { x: s.x, y: s.y, vx: s.vx, vy: s.vy, state: s.state, last: byId(s.last), smash: s.smash, trail: s.trail.map((t) => ({ ...t })) });
+  Object.assign(game, {
+    state: g.state, server: byId(g.server), timer: g.timer, msg: g.msg && { ...g.msg }, paused: g.paused, winner: byId(g.winner),
+    pointWinner: byId(g.pointWinner), time: g.time, freeze: g.freeze, shakeT: g.shakeT, shakeA: g.shakeA, rng: g.rng,
+  });
+  bolts.length = 0;
+  for (const b of st.b) bolts.push({ ...b, owner: byId(b.owner) });
+  marks.length = 0;
+  for (const m of st.m) marks.push({ ...m });
+}
+// 32-bit hash of a saved state, from the exact bits of every number (-0 counts as 0)
+const hashF64 = new Float64Array(1), hashU32 = new Uint32Array(hashF64.buffer);
+function hashState(st) {
+  let h = 0x811c9dc5;
+  const mix = (w) => {
+    h = Math.imul(h ^ w, 0x01000193);
+    h ^= h >>> 15;
+  };
+  const walk = (v) => {
+    if (typeof v === "number") (hashF64[0] = v + 0), mix(hashU32[0]), mix(hashU32[1]);
+    else if (typeof v === "string") {
+      mix(v.length);
+      for (let i = 0; i < v.length; i++) mix(v.charCodeAt(i));
+    } else if (typeof v === "boolean") mix(v ? 3 : 2);
+    else if (v == null) mix(1);
+    else if (Array.isArray(v)) (mix(v.length), v.forEach(walk));
+    else for (const k of Object.keys(v).sort()) if (v[k] !== undefined) (walk(k), walk(v[k]));
+  };
+  walk(st);
+  return h >>> 0;
 }
 
 // ICE servers: Google STUN always (free: it only tells each browser its public address), plus Cloudflare TURN
@@ -1278,7 +1519,7 @@ async function hostRoom() {
   peer.on("open", () => ui.status("친구에게 이 방 코드를 알려 주세요. 친구가 들어오길 기다리는 중…", "", code));
   peer.on("connection", (conn) => {
     watchConn(conn, "host");
-    if (conn.label === "state") return void ((net.state = conn), conn.on("data", onGuestMove));
+    if (conn.label !== "ctl") return void conn.close(); // (the game itself runs on a channel of this connection)
     if (net.ctl?.open) return void conn.on("open", () => (conn.send({ t: "full" }), setTimeout(() => conn.close(), 300)));
     ui.status("친구가 들어오는 중…", "", code);
     net.ctl = conn;
@@ -1293,7 +1534,7 @@ async function hostRoom() {
     conn.on("open", () => {
       setMode("host");
       toTitle();
-      startPinging();
+      openGameChannel(conn);
       showRoute(conn, "친구와 연결됐어요! 나는 1P(방장)예요. Enter를 누르면 시작해요", code);
     });
     conn.on("data", onCtl);
@@ -1345,10 +1586,8 @@ async function joinRoom(raw) {
     ui.status("방장을 찾는 중…");
     const id = ROOM_PREFIX + code;
     const ctl = peer.connect(id, { label: "ctl", reliable: true, serialization: "json" });
-    const st = peer.connect(id, { label: "state", reliable: false, serialization: "json" });
-    Object.assign(net, { ctl, state: st });
+    net.ctl = ctl;
     watchConn(ctl, "guest");
-    watchConn(st, "guest");
     // ICE can sit in "checking" for a long time without ever reporting failure: give up after 20 s and say why
     setTimeout(async () => {
       if (net.peer !== peer || ctl.open) return;
@@ -1359,225 +1598,18 @@ async function joinRoom(raw) {
     }, 20000);
     ctl.on("open", () => {
       held.clear();
-      effects.length = 0;
-      fxById.clear();
-      resetGuest();
       setMode("guest");
-      startPinging();
+      toTitle();
+      openGameChannel(ctl);
       showRoute(ctl, "연결됐어요! 나는 2P예요. 방장이나 내가 Enter를 누르면 시작해요", code);
     });
     ctl.on("data", onCtl);
     ctl.on("close", onDisconnect);
-    st.on("data", onSnapshot);
   });
   peer.on("error", (err) => {
     if (err.type === "peer-unavailable") (leave(true), ui.status("그 코드의 방을 찾을 수 없어요. 코드를 다시 확인해 주세요.", "warn"));
     else ui.status(`연결 오류 (${err.type}). 다시 시도해 주세요.`, "warn");
   });
-}
-
-// ---- snapshots (host → guest)
-const r1 = (v) => Math.round(v * 10) / 10, r3 = (v) => Math.round(v * 1000) / 1000;
-function snapshot() {
-  const m = game.msg;
-  return {
-    seq: ++net.seq,
-    fx: fxId,
-    ep: net.p2Epoch, // bumped whenever the host itself moves 2P (new rally, a hit): the guest re-syncs to it
-    g: [game.state, r3(game.time), game.server.id, game.paused ? 1 : 0, r3(game.shakeT), game.shakeA, m ? [m.text, m.color, r3(m.t), m.dur, m.y] : 0],
-    p: PLAYERS.map((p) => [
-      r1(p.x), r1(p.y), r1(p.vx), p.face, p.ground ? 1 : 0, p.act ? [p.act.type, r3(p.act.t)] : 0,
-      r3(p.cd.zap), r3(p.cd.tail), r3(p.cd.quick), r3(p.quickT), p.quickDir, r3(p.stun), p.stunKind, p.knocked ? 1 : 0, r3(p.iframes),
-      p.trail.map((g) => [r1(g.x), r1(g.y), g.flip ? 1 : 0, r3(g.a)]), p.score, r1(p.vy), Math.round(p.squash * 100) / 100,
-    ]),
-    s: [r1(S.x), r1(S.y), r1(S.vx), r1(S.vy), S.state, r3(S.smash), S.trail.map((t) => [r1(t.x), r1(t.y)])],
-    b: bolts.map((b) => [r1(b.x), r1(b.y), b.vx, b.seed]),
-    d: dust.map((d) => [r1(d.x), r1(d.y), d.c, r3(d.life), r3(d.max)]),
-    m: marks.map((k) => [r1(k.x), r3(k.t), k.inside ? 1 : 0]),
-    e: effects.map((e) => [e.id, r3(e.fx.t), e.fx.options.x, e.fx.options.y, e.fx.options.flip ? 1 : 0, e.stopped ? 1 : 0]),
-  };
-}
-// draw one snapshot's state (the guest calls this every frame with the snapshot it is showing)
-function applyState(d) {
-  const [st, time, sid, paused, shakeT, shakeA, m] = d.g;
-  Object.assign(game, { state: st, time, paused: !!paused, shakeT, shakeA, server: sid === 1 ? P1 : P2 });
-  game.msg = m ? { text: m[0], color: m[1], t: m[2], dur: m[3], y: m[4] } : null;
-  d.p.forEach((a, i) => {
-    const p = PLAYERS[i];
-    [p.x, p.y, p.vx, p.face] = a;
-    p.ground = !!a[4];
-    p.act = a[5] ? { type: a[5][0], t: a[5][1] } : null;
-    p.cd = { zap: a[6], tail: a[7], quick: a[8] };
-    [p.quickT, p.quickDir, p.stun, p.stunKind] = [a[9], a[10], a[11], a[12]];
-    p.knocked = !!a[13];
-    p.iframes = a[14];
-    p.trail = a[15].map(([x, y, f, al]) => ({ x, y, flip: !!f, a: al }));
-    p.score = a[16];
-    p.squash = a[18] ?? 0;
-  });
-  [S.x, S.y, S.vx, S.vy, S.state, S.smash] = d.s;
-  S.trail = d.s[6].map(([x, y]) => ({ x, y }));
-  bolts.length = 0;
-  for (const [x, y, vx, seed] of d.b) bolts.push({ x, y, vx, seed });
-  dust.length = 0;
-  for (const [x, y, c, life, max] of d.d) dust.push({ x, y, c, life, max });
-  marks.length = 0;
-  for (const [x, t, inside] of d.m) marks.push({ x, t, inside: !!inside });
-  // effects: catch each one up to the host's clock; drop the ones the host has finished; hide the ones that
-  // arrived early (their spawn message beats the snapshot we are showing) until the shown time reaches them
-  const alive = new Set();
-  for (const [id, t, x, y, flip, stopped] of d.e) {
-    alive.add(id);
-    const e = fxById.get(id);
-    if (!e) continue;
-    Object.assign(e.fx.options, { x, y, flip: !!flip });
-    if (t > e.fx.t) e.fx.update(t - e.fx.t);
-    if (stopped && !e.stopped) (e.fx.stop(), (e.stopped = true));
-  }
-  for (let i = effects.length - 1; i >= 0; i--) {
-    const e = effects[i];
-    e.shown = alive.has(e.id);
-    if (!e.shown && e.id <= d.fx) (effects.splice(i, 1), fxById.delete(e.id));
-  }
-}
-
-// ---- 2P (the guest): smooth playback of the host's game, and its own Pikachu predicted locally
-// Snapshots are kept for a moment and the game is drawn INTERP seconds behind the newest one, blending
-// between the two around that time, so uneven packet arrival no longer shows as stutter or jumps.
-// The guest's own Pikachu does not wait for the round trip at all: it is moved here as keys are pressed
-// (same rules as updatePlayer) and its position is sent to the host, which uses it while 2P moves freely.
-// When the host moves 2P itself (a hit, a stun, a new rally) it bumps an epoch and the guest snaps to it.
-const INTERP = 0.05;
-const guest = { snaps: [], offs: [], latest: null, sendAt: 0 };
-const own = { epoch: -1, follow: true, n: 0, squash: 0, x: 288, y: FLOOR, vx: 0, vy: 0, ground: true, face: -1, quickT: 0, quickDir: null, cd: { zap: 0, quick: 0 }, act: null, trail: [] };
-function resetGuest() {
-  Object.assign(guest, { snaps: [], offs: [], latest: null });
-  Object.assign(own, { epoch: -1, follow: true, act: null, trail: [] });
-}
-function onSnapshot(d) {
-  if (net.mode !== "guest" || d.seq <= net.lastSeq) return; // unreliable channel: drop late arrivals
-  net.lastSeq = d.seq;
-  d.host = d.g[1];
-  guest.offs.push(performance.now() / 1000 - d.host); // arrival time minus host time; the smallest is the least delayed
-  if (guest.offs.length > 120) guest.offs.shift();
-  guest.snaps.push(d);
-  if (guest.snaps.length > 60) guest.snaps.shift();
-  guest.latest = d;
-  const a = d.p[1], hurt = a[11] > 0 || a[13];
-  if (hurt || d.ep !== own.epoch) {
-    // the host is moving 2P (or a new rally started): take its state as ours
-    Object.assign(own, { x: a[0], y: a[1], vx: a[2], vy: a[17] ?? 0, face: a[3], ground: !!a[4], quickT: a[9], quickDir: a[10], act: null, trail: [] });
-    own.cd = { zap: a[6], quick: a[8] };
-    own.epoch = d.ep;
-  }
-  own.follow = !!hurt;
-}
-// one fixed step of our own Pikachu (the movement half of updatePlayer; hits and scoring stay on the host)
-function predictSelf(dt) {
-  const L = guest.latest;
-  if (!L || own.follow) return;
-  const p = own, c = ANY, has = (k) => k.some((x) => held.has(x)), hit = (k) => k.some((x) => pressed.has(x));
-  const dirX = (has(c.right) ? 1 : 0) - (has(c.left) ? 1 : 0), st = L.g[0];
-  p.cd.zap = Math.max(0, p.cd.zap - dt);
-  p.cd.quick = Math.max(0, p.cd.quick - dt);
-  if (st !== "title" && st !== "over" && !L.g[3]) {
-    if (!p.act && p.quickT <= 0 && Math.abs(P1.x - p.x) > 1) p.face = Math.sign(P1.x - p.x);
-    if (hit(c.quick) && p.cd.quick <= 0 && p.quickT <= 0) {
-      Object.assign(p, { act: null, quickT: QUICK.dur });
-      p.cd.quick = QUICK.cd;
-      if (has(c.up)) Object.assign(p, { quickDir: "up", vy: -QUICK.up, ground: false, vx: dirX * RUN });
-      else {
-        const d = dirX === -p.face ? -p.face : p.face;
-        Object.assign(p, { quickDir: d, vx: d * QUICK.speed, vy: 0 });
-      }
-    } else if (!p.act && p.quickT <= 0) {
-      if (hit(c.zap) && p.cd.zap <= 0) (p.act = { type: "zap", t: 0 }), (p.cd.zap = ZAP.cd);
-      else if (hit(c.basic)) p.act = { type: "basic", t: 0 };
-    }
-    if (hit(c.up) && p.ground && p.quickT <= 0) (p.vy = -JUMP_V), (p.ground = false);
-    if (p.quickT > 0) {
-      p.quickT -= dt;
-      if (p.quickDir === "up") p.vx = dirX * RUN * 1.2;
-    } else p.vx = dirX * RUN * (p.act ? 0.55 : 1);
-  } else p.vx = 0;
-  if (!(p.quickT > 0 && p.quickDir !== "up")) p.vy += GRAV * dt;
-  p.x += p.vx * dt;
-  p.y += p.vy * dt;
-  if (p.y >= FLOOR) (p.y = FLOOR), (p.vy = 0), (p.ground = true);
-  else p.ground = false;
-  p.x = clamp(p.x, 12, W - 12);
-  if (st === "serve") {
-    const gap = L.g[2] === 2 ? SERVICE_LINE : SERVE_GAP;
-    if (p.x < NET_X + gap) (p.x = NET_X + gap), (p.vx = Math.max(p.vx, 0));
-  }
-  if (p.quickT > 0) p.trail.push({ x: p.x, y: p.y, flip: p.face > 0, a: 0.8 });
-  for (const g of p.trail) g.a -= dt * 4;
-  p.trail = p.trail.filter((g) => g.a > 0).slice(-6);
-  if (p.act && (p.act.t += dt) >= (p.act.type === "zap" ? ZAP.dur : BASIC.dur)) p.act = null;
-  const squashTo = p.ground && st !== "title" && st !== "over" && has(c.down) ? 1 : 0;
-  p.squash += (squashTo - p.squash) * Math.min(1, dt * SQUASH.rate);
-}
-function sendSelf(now) {
-  if (own.follow || own.epoch < 0 || !net.state?.open || now - guest.sendAt < 15) return;
-  guest.sendAt = now;
-  net.state.send({ t: "pos", n: ++own.n, ep: own.epoch, tm: r3(now / 1000), x: r1(own.x), y: r1(own.y), vx: r1(own.vx), vy: r1(own.vy), g: own.ground ? 1 : 0, f: own.face, q: r3(own.quickT), qd: own.quickDir, cq: r3(own.cd.quick) });
-}
-// what the guest draws this frame
-function showGuest(now) {
-  const snaps = guest.snaps;
-  if (!snaps.length) return;
-  const H = now / 1000 - Math.min(...guest.offs) - INTERP; // the host time we are showing
-  let i = snaps.length - 1;
-  while (i > 0 && snaps[i].host > H) i--;
-  const A = snaps[i], B = snaps[i + 1] ?? A, k = B === A ? 0 : clamp((H - A.host) / (B.host - A.host));
-  if (i > 1) snaps.splice(0, i - 1);
-  applyState(A);
-  if (B !== A) {
-    const mix = (a, b) => a + (b - a) * k;
-    for (let n = 0; n < 2; n++) (PLAYERS[n].x = mix(A.p[n][0], B.p[n][0])), (PLAYERS[n].y = mix(A.p[n][1], B.p[n][1]));
-    if (A.s[4] === "fly" && B.s[4] === "fly" && Math.hypot(B.s[0] - A.s[0], B.s[1] - A.s[1]) < 60) (S.x = mix(A.s[0], B.s[0])), (S.y = mix(A.s[1], B.s[1]));
-    for (const b of bolts) {
-      const m = B.b.find((q) => q[3] === b.seed);
-      if (m) b.x = mix(b.x, m[0]);
-    }
-  }
-  const L = guest.latest.p[1];
-  // being hit shows as soon as it is known, not INTERP later
-  [P2.stun, P2.stunKind, P2.knocked, P2.iframes] = [L[11], L[12], !!L[13], L[14]];
-  if (!own.follow) {
-    // our own Pikachu, where we predict it (while the host moves us after a hit, its smoothed 2P is shown instead)
-    Object.assign(P2, { x: own.x, y: own.y, vx: own.vx, face: own.face, ground: own.ground, quickT: own.quickT, quickDir: own.quickDir, trail: own.trail, squash: own.squash });
-    P2.cd = { ...P2.cd, zap: own.cd.zap, quick: own.cd.quick };
-    // our swing shows at once; an Iron Tail (decided by the host when a jump swing meets the shuttle) shows from the host
-    P2.act = L[5] && L[5][0] === "tail" ? { type: "tail", t: L[5][1] } : own.act;
-  }
-  // a shuttle waiting to be served sits in the server's hand as drawn here, not where the snapshot had it
-  if (S.state === "serve") followServer();
-}
-// the host's side: the guest's latest report of where its 2P is
-// Reports arrive unevenly, so 2P is played back INTERP behind the newest one, blending between the two around
-// that moment (on the guest's own clock, sent with each report) instead of jumping to each as it lands.
-function onGuestMove(d) {
-  if (d?.t !== "pos" || net.mode !== "host") return;
-  const list = net.p2Reports, last = list[list.length - 1], now = performance.now();
-  if (last && d.ep === last.ep && d.n <= last.n) return; // arrived late
-  if (last && d.ep !== last.ep) list.length = 0; // a new epoch starts a new track
-  list.push({ ...d, at: now });
-  if (list.length > 40) list.shift();
-  net.p2Offs.push(now / 1000 - d.tm); // arrival minus send time; the smallest is the least delayed
-  if (net.p2Offs.length > 120) net.p2Offs.shift();
-}
-function guestMove(p) {
-  const list = net.p2Reports, last = list[list.length - 1];
-  if (net.mode !== "host" || p !== P2 || !last || last.ep !== net.p2Epoch || p.knocked || p.stun > 0) return null;
-  if (performance.now() - last.at > 250) return null; // stale (connection hiccup): fall back to the guest's keys
-  const T = performance.now() / 1000 - Math.min(...net.p2Offs) - INTERP; // the guest's moment we show
-  let i = list.length - 1;
-  while (i > 0 && list[i].tm > T) i--;
-  const A = list[i], B = list[i + 1] ?? A, k = B === A ? 0 : clamp((T - A.tm) / (B.tm - A.tm));
-  if (i > 1) list.splice(0, i - 1);
-  const mix = (a, b) => a + (b - a) * k;
-  return { ...A, x: mix(A.x, B.x), y: mix(A.y, B.y), vx: mix(A.vx, B.vx), vy: mix(A.vy, B.vy) };
 }
 
 // ---- touch controls (phones and tablets): on-screen buttons that press the 1P keys
@@ -1733,8 +1765,9 @@ const ui = (() => {
       el.room.hidden = !code;
       if (!code) el.ping.textContent = "";
     },
-    ping(ms) {
+    ping(ms, detail = "") {
       el.ping.textContent = `핑 ${ms}ms`;
+      el.ping.title = detail;
     },
     sync() {
       const busy = !!net.peer || !!net.starting;
@@ -1776,42 +1809,51 @@ const ui = (() => {
 const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
 const img = new ImageData(W, H);
 let last = performance.now(), acc = 0;
-// advance the game (and stream it to the guest); drawing happens only in frameLoop
+// advance the game to `now`; drawing happens only in frameLoop
 function tick(now) {
-  acc = Math.min(acc + (now - last) / 1000, 0.25);
+  const elapsed = (now - last) / 1000;
   last = now;
-  if (net.mode === "guest") {
-    // the host runs the game; we move our own Pikachu ahead of it, tell the host where it is, and draw the
-    // host's game a moment behind, smoothed (see showGuest)
-    while (acc >= DT) {
-      predictSelf(DT);
-      pressed.clear();
-      acc -= DT;
+  if (net.rb) {
+    // online: rollback.js plays the frames (ours, theirs, and any replays) and exchanges the keys
+    net.rb.tick(now);
+    if (now - net.pingShown > 500 && net.rb.rtt !== null) {
+      net.pingShown = now;
+      const st = net.rb.stats;
+      ui.ping(Math.round(net.rb.rtt), `입력 지연 ${net.rb.delay}프레임 · 되감기 ${st.replays}번(최대 ${st.maxReplay}프레임) · 기다림 ${st.waits}번 · 불일치 ${st.desyncs}번`);
     }
-    sendSelf(now);
-    showGuest(now);
-  } else {
-    while (acc >= DT) {
-      step(DT);
-      pressed.clear();
-      REMOTE.pressed.clear();
-      acc -= DT;
-    }
-    if (net.mode === "host" && net.state?.open && now - net.lastSend >= 15) {
-      net.lastSend = now;
-      net.state.send(snapshot());
-    }
+    return;
+  }
+  if (net.mode !== "local") return; // online, until both sides are ready to start
+  acc = Math.min(acc + elapsed, 0.25);
+  while (acc >= DT) {
+    step(DT);
+    pressed.clear();
+    acc -= DT;
   }
 }
-// A hidden tab gets no animation frames, which would freeze the host's game for both players.
-// Timers inside a worker keep running in the background, so they keep the host ticking.
+// A hidden tab gets no animation frames, which would freeze an online game for both players.
+// Timers inside a worker keep running in the background, so they keep it ticking.
 const bgTicker = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 16)"], { type: "text/javascript" })));
 let lastFrame = performance.now();
 bgTicker.onmessage = () => {
   const now = performance.now();
-  if (net.mode === "host" && now - lastFrame > 100) tick(now); // frames have stalled: tab hidden or covered
+  if (net.mode !== "local" && now - lastFrame > 100) tick(now); // frames have stalled: tab hidden or covered
 };
+// setTimeout for the network simulator (?netsim): worker timers are not slowed down in a background tab
+const workerTimeout = (() => {
+  let worker = null, n = 0;
+  const waiting = new Map();
+  return (ms, fn) => {
+    if (!worker) {
+      worker = new Worker(URL.createObjectURL(new Blob(["onmessage = (e) => setTimeout(() => postMessage(e.data.id), e.data.ms)"], { type: "text/javascript" })));
+      worker.onmessage = (e) => (waiting.get(e.data)?.(), waiting.delete(e.data));
+    }
+    waiting.set(++n, fn);
+    worker.postMessage({ id: n, ms });
+  };
+})();
 function frameLoop(now) {
+  requestAnimationFrame(frameLoop); // first, so that one bad frame cannot stop the game
   lastFrame = performance.now();
   tick(now);
   render();
@@ -1820,7 +1862,6 @@ function frameLoop(now) {
   ctx.fillStyle = "#0b0a12";
   ctx.fillRect(0, 0, W, H);
   ctx.putImageData(img, Math.round((Math.random() - 0.5) * 2 * s), Math.round((Math.random() - 0.5) * 2 * s));
-  requestAnimationFrame(frameLoop);
 }
 P1.x = 96;
 P2.x = 288;
@@ -1828,4 +1869,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, isMacChrome, own, guest, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
