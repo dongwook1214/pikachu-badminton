@@ -283,6 +283,11 @@ function startQuick(p, dirX) {
   }
 }
 
+// an Extreme CPU that has just won a point (or the game) gloats; it alone may still move on the game-over screen
+const gloating = (p) =>
+  ai.on && p === P2 && !!AI_LEVELS[ai.level].taunt && (game.state === "point" ? game.pointWinner : game.state === "over" ? game.winner : null) === P2;
+const inPlay = (p) => (game.state !== "title" && game.state !== "over") || gloating(p);
+
 function updatePlayer(p, dt) {
   const o = other(p), c = p.ctl, dirX = (pHeld(p, c.right) ? 1 : 0) - (pHeld(p, c.left) ? 1 : 0);
   const rep = guestMove(p); // online host: 2P moves where the guest's own (predicted) game says it is
@@ -304,7 +309,7 @@ function updatePlayer(p, dt) {
     }
   }
 
-  if (free && game.state !== "title" && game.state !== "over") {
+  if (free && inPlay(p)) {
     if (rep) p.face = rep.f;
     else if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
     if (!rep && pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
@@ -365,7 +370,7 @@ function updatePlayer(p, dt) {
   }
 
   // hold Down on the ground to squash flat (eased in and out; just for show)
-  const squashTo = p.ground && free && game.state !== "title" && game.state !== "over" && pHeld(p, c.down) ? 1 : 0;
+  const squashTo = p.ground && free && inPlay(p) && pHeld(p, c.down) ? 1 : 0;
   p.squash += (squashTo - p.squash) * Math.min(1, dt * SQUASH.rate);
 
   // after-images while dashing
@@ -494,8 +499,9 @@ const AI_LEVELS = {
   normal: { name: "NORMAL", react: 0.2, aimErr: 9, miss: 0.08, smash: 0.45, zap: 0.15, dash: true, dodge: 0.5, serveWait: [0.9, 1.6] },
   hard: { name: "HARD", react: 0.07, aimErr: 3, miss: 0, smash: 0.85, zap: 0.3, dash: true, dodge: 0.9, serveWait: [0.5, 1.0] },
   // smart: plays every shot out (smash or each ground shot) and picks the one hardest to return, never hits it
-  // out or into the net, and times its zaps to stun the other player just before they must hit (not now and then)
-  extreme: { name: "EXTREME", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.35, 0.6], smart: true },
+  // out or into the net, and times its zaps to stun the other player just before they must hit (not now and then).
+  // taunt: gloats after every point it wins, and on and on after winning the game (see tauntStep)
+  extreme: { name: "EXTREME", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.35, 0.6], smart: true, taunt: true },
 };
 const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, dodged: new Set() };
 const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
@@ -599,11 +605,37 @@ function killerShot(me, op) {
   return near[(Math.random() * near.length) | 0].dir;
 }
 
+// Extreme, having won a point: gloat. Taunts: rushing over the net to whack the loser (Quick Attack, then the
+// swing), squash spam, and wiggling side to side while squashed. After a point it picks one and the next serve
+// waits for it to finish; on the game-over screen it goes on, one after another (walking right up beside them
+// first, as there's time), until a new game starts.
+const TAUNTS = [["rush", 2.6], ["squats", 1.6], ["wiggle", 1.6]];
+function tauntStep(me, op, now, hold, press) {
+  if (!ai.taunt) {
+    const i = (Math.random() * TAUNTS.length) | 0;
+    ai.taunt = { i, until: now + TAUNTS[i][1] };
+    if (game.state === "point") game.timer = Math.max(game.timer, TAUNTS[i][1]);
+  }
+  const t = ai.taunt, over = game.state === "over";
+  if (over && now >= t.until) (t.i = (t.i + 1) % TAUNTS.length), (t.until = now + TAUNTS[t.i][1]);
+  const kind = TAUNTS[t.i][0], dx = op.x - me.x, toward = dx > 0 ? "right" : "left";
+  if (kind === "rush") {
+    if (Math.abs(dx) > 20) {
+      hold(toward);
+      if (Math.abs(dx) > 40 && me.cd.quick <= 0) press("quick");
+    } else if (!me.act) press("basic");
+  } else if (over && Math.abs(dx) > (kind === "squats" ? 30 : 44)) hold(toward);
+  else if (kind === "squats") Math.floor(now / 0.14) % 2 === 0 && hold("down");
+  else (hold("down"), hold(Math.floor(now / 0.22) % 2 ? "left" : "right"));
+}
+
 function aiStep() {
   const me = P2, op = P1, L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
   const held = AI_SRC.held, press = (a) => AI_SRC.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
   AI_SRC.pressed.clear();
   held.clear();
+  if (!gloating(me)) ai.taunt = null;
+  else return void (me.stun <= 0 && !me.knocked && !game.paused && tauntStep(me, op, now, hold, press));
   if (game.state === "title" || game.state === "over" || game.paused || me.stun > 0 || me.knocked) return;
   const fwd = me.face > 0 ? "right" : "left", back = me.face > 0 ? "left" : "right";
   const home = me === P2 ? 290 : 94;
