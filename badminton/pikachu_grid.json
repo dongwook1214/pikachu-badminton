@@ -43,5 +43,64 @@
   "t": "#fad636",
   "k": "#221c1a"
  },
- "center_x": 14
+ "center_x": 14,
+ "squash": [
+  {
+   "rows": [
+    "........................................",
+    ".K................................K.....",
+    ".KKK............................KKK.....",
+    "..KKKK........................KKKK......",
+    "...KKKKK....................KKKKK.......",
+    "....KKYYKK................KKYYKK........",
+    ".....KYYYYKKKKKKKKKKKKKKKKYYYYK.........",
+    "......KYYYYYYYYYYYYYYYYYYYYYYK..........",
+    ".....KYYYYYYYYYYYYYYYYYYYYYYYYK.........",
+    "....KYYYYYYYYYYYYYYYYYYYYYYYYYYK........",
+    "....KYYYYKKKYYYYYYYYYYYYKKKYYYYK........",
+    "...KYYYYYYYYYYYYYKKYYYYYYYYYYYYYK.kkkkk.",
+    "...KYYYYYYYYYYYYYYYYYYYYYYYYYYYYKkttttk.",
+    "...KRRRRYYYYYYYKYKKYKYYYYYYYRRRRKtttkk..",
+    "...KRRRRYYYYYYYYKYYKYYYYYYYYRRRRKtttk...",
+    "....KYYYYYYYYYYYYYYYYYYYYYYYYYYKkttk....",
+    ".....KYYYYYYYYYYYYYYYYYYYYYYYYKkttk.....",
+    "....KYYYYYYYYYYYYYYYYYYYYYYYYYYKk.......",
+    "....KYKKYYYYYYYYYYYYYYYYYYYYKKYK........",
+    "....KYYKYYYYYYYYYYYYYYYYYYYYKYYK........",
+    "....KOYYYYYYYYYYYYYYYYYYYYYYYYOK........",
+    "...KYOOYYYYYYYYYYYYYYYYYYYYYYOOYK.......",
+    "...KYYKOOOOOOOOOOOOOOOOOOOOOOKYYK.......",
+    "...KKKKKKKKKKKKKKKKKKKKKKKKKKKKKK.......",
+    "........................................"
+   ],
+   "center_x": 18
+  },
+  {
+   "rows": [
+    "..............................................",
+    ".KK..................................KK.......",
+    ".KKKKK............................KKKKK.......",
+    "..KKKYYKK......................KKYYKKK........",
+    "....KYYYYYKK................KKYYYYYK..........",
+    "......KKYYYYKKKKKKKKKKKKKKKKYYYYKK............",
+    ".......KYYYYYYYYYYYYYYYYYYYYYYYYK.......kkkkk.",
+    "......KYYYYYYYYYYYYYYYYYYYYYYYYYYK.....kttttk.",
+    ".....KYYYYYYYYYYYYYYYYYYYYYYYYYYYYK...kttttk..",
+    "....KYYYYYYKKYYYYYYYYYYYYYYKKYYYYYYK.kttttk...",
+    "....KYYYYYYYYKYYYYYYYYYYYYKYYYYYYYYKkttttttk..",
+    "....KYYYYYYKKYYYYYYKKYYYYYYKKYYYYYYKkkkkttk...",
+    "...KYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYK..ktk....",
+    "...KRRRRYYYYYYYYYKYKKYKYYYYYYYYYRRRRK.kttk....",
+    "...KRRRRYYYYYYYYYYKYYKYYYYYYYYYYRRRRKkttk.....",
+    "....KYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYKkttk......",
+    "...KYYKKYYYYYYYYYYYYYYYYYYYYYYYYKKYYKBk.......",
+    "...KOYYKYYYYYYYYYYYYYYYYYYYYYYYYKYYOKk........",
+    "...KOOYYYYYYYYYYYYYYYYYYYYYYYYYYYYOOK.........",
+    "....KOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOK..........",
+    ".....KKKKKKKKKKKKKKKKKKKKKKKKKKKKKK...........",
+    ".............................................."
+   ],
+   "center_x": 20
+  }
+ ]
 }

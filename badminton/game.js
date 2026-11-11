@@ -16,6 +16,7 @@ const GRAV = 900, JUMP_V = 330, RUN = 115;
 const SH_G = 420, SH_K = 0.0028;              // shuttle gravity and quadratic drag (tuned in a sim)
 const WIN = 11;
 const SERVE_GAP = 12; // during the serve, how close to the net a player's center may get
+const SQUASH = { y: 0.62, x: 1.22, rate: 16 }; // Down held: height and width at full squash, ease speed
 const SERVICE_LINE = 56; // the short service lines sit this far either side of the net; the server stays behind theirs
 const DT = 1 / 60;
 
@@ -33,14 +34,19 @@ const WHITE = C("#ffffff"), INK = C("#0b0a12");
 // ---------------------------------------------------------------- sprites
 // players: pikachu_grid.json (art/pikachu_pixel.py); the CPU opponent: cpu_grid.json (art/cpu_pixel.py, original)
 // A sprite: trimmed rows, its palette, the offset that puts its feet at (0, 0), and a pixelfx actor (mask +
-// pixels) for the effects that wrap a body (electrified, stunned).
-function makeSprite(g) {
+// pixels) for the effects that wrap a body (electrified, stunned). squash: hand-drawn frames for holding Down
+// (halfway, then flat), each trimmed the same way; a sprite without them is squashed by resampling instead.
+function trimFrame(g) {
   let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1;
   g.rows.forEach((r, y) => [...r].forEach((ch, x) => {
     if (ch !== ".") (x0 = Math.min(x0, x), x1 = Math.max(x1, x), y0 = Math.min(y0, y), y1 = Math.max(y1, y));
   }));
   const rows = g.rows.slice(y0, y1 + 1).map((r) => r.slice(x0, x1 + 1));
-  const w = rows[0].length, h = rows.length, ax = -(g.center_x - x0), ay = -h;
+  return { rows, ax: -(g.center_x - x0), ay: -rows.length };
+}
+function makeSprite(g) {
+  const { rows, ax, ay } = trimFrame(g);
+  const w = rows[0].length, h = rows.length;
   const mask = { w, h, data: new Uint8Array(w * h) }, pixels = new Uint32Array(w * h);
   rows.forEach((r, y) => [...r].forEach((ch, x) => {
     if (ch === ".") return;
@@ -48,7 +54,7 @@ function makeSprite(g) {
     pixels[y * w + x] = C(g.palette[ch]);
   }));
   const actor = { mask, pixels, x: ax, y: ay, w, h, k: 2, head: [0, ay], chest: [0, Math.round(ay * 0.55)] };
-  return { rows, pal: { ...g.palette }, ax, ay, actor };
+  return { rows, pal: { ...g.palette }, ax, ay, actor, squash: (g.squash ?? []).map(trimFrame) };
 }
 const [pikaGrid, cpuGrid] = await Promise.all(["./pikachu_grid.json", "./cpu_grid.json"].map((u) => fetch(u).then((r) => r.json())));
 const SPR_P1 = makeSprite(pikaGrid);
@@ -105,7 +111,7 @@ const makePlayer = (id) => ({
   x: 0, y: FLOOR, vx: 0, vy: 0, face: id === 1 ? 1 : -1, ground: true,
   act: null, cd: { zap: 0, tail: 0, quick: 0 }, quickT: 0, quickDir: null,
   stun: 0, stunKind: null, knocked: false, knockT: 0, iframes: 0, statusFx: null,
-  trail: [], score: 0,
+  trail: [], score: 0, squash: 0,
 });
 const P1 = makePlayer(1), P2 = makePlayer(2), PLAYERS = [P1, P2];
 const other = (p) => (p === P1 ? P2 : P1);
@@ -350,6 +356,10 @@ function updatePlayer(p, dt) {
     clearStatus(p);
     p.statusFx = spawn(stunnedFx, { x: p.x, y: p.y, actor: p.spr.actor }, { follow: p });
   }
+
+  // hold Down on the ground to squash flat (eased in and out; just for show)
+  const squashTo = p.ground && free && game.state !== "title" && game.state !== "over" && pHeld(p, c.down) ? 1 : 0;
+  p.squash += (squashTo - p.squash) * Math.min(1, dt * SQUASH.rate);
 
   // after-images while dashing
   if (p.quickT > 0) p.trail.push({ x: p.x, y: p.y, flip: p.face > 0, a: 0.8 });
@@ -674,6 +684,24 @@ function drawNet(p) {
   p.rect(NET_X - 2, NET_BOTTOM, 5, 1, C("#9aa0bc"));
 }
 
+// the hand-drawn squash frame for this much squash (none below a sliver; halfway, then flat)
+const squashFrame = (spr, amount) => (amount < 0.12 || !spr.squash.length ? null : spr.squash[amount < 0.6 ? 0 : spr.squash.length - 1]);
+
+// a sprite without squash frames, squashed flat with its feet kept on the floor (nearest-pixel resampling, so it stays crisp)
+function drawSquashed(P, spr, pal, amount, tint) {
+  const sy = 1 - (1 - SQUASH.y) * amount, sx = 1 + (SQUASH.x - 1) * amount;
+  const w = spr.rows[0].length, h = spr.rows.length, w2 = Math.round(w * sx), h2 = Math.max(1, Math.round(h * sy));
+  const x0 = Math.round(spr.ax * sx), y0 = -h2, cache = {};
+  for (let ty = 0; ty < h2; ty++) {
+    const row = spr.rows[Math.min(h - 1, Math.floor(ty / sy))];
+    for (let tx = 0; tx < w2; tx++) {
+      const ch = row[Math.min(w - 1, Math.floor(tx / sx))];
+      if (ch === "." || ch === " ") continue;
+      P.dot(x0 + tx, y0 + ty, tint ?? (cache[ch] ??= C(pal[ch])));
+    }
+  }
+}
+
 function drawPlayer(p, P) {
   const spr = p.spr;
   let flip = p.face > 0, pal = spr.pal, ox = 0, oy = 0, tint;
@@ -706,7 +734,11 @@ function drawPlayer(p, P) {
     }
   }
   P.place(Math.round(p.x + ox), Math.round(p.y + oy), flip);
-  if (!blinkOff) P.sprite(spr.rows, pal, spr.ax, spr.ay, { tint });
+  const pose = squashFrame(spr, p.squash) ?? spr;
+  if (!blinkOff) {
+    if (!spr.squash.length && p.squash > 0.02) drawSquashed(P, spr, pal, p.squash, tint);
+    else P.sprite(pose.rows, pal, pose.ax, pose.ay, { tint });
+  }
 
   // cheeks spark while charging a zap
   if (a?.type === "zap") {
@@ -728,8 +760,9 @@ function drawPlayer(p, P) {
   }
   // player tag (online: mark which one is you)
   P.place(0, 0);
-  P.text(tagOf(p), Math.round(p.x), Math.round(p.y + spr.ay - 9), p.tag, { align: "center", outline: INK });
-  if (net.mode !== "local" && p.id === myId()) P.text("YOU", Math.round(p.x), Math.round(p.y + spr.ay - 16), WHITE, { align: "center", outline: INK });
+  const top = spr.squash.length ? pose.ay : Math.round(spr.ay * (1 - (1 - SQUASH.y) * p.squash)); // shorter while squashed
+  P.text(tagOf(p), Math.round(p.x), Math.round(p.y + top - 9), p.tag, { align: "center", outline: INK });
+  if (net.mode !== "local" && p.id === myId()) P.text("YOU", Math.round(p.x), Math.round(p.y + top - 16), WHITE, { align: "center", outline: INK });
 }
 
 function drawShuttle(P) {
@@ -1260,7 +1293,7 @@ function snapshot() {
     p: PLAYERS.map((p) => [
       r1(p.x), r1(p.y), r1(p.vx), p.face, p.ground ? 1 : 0, p.act ? [p.act.type, r3(p.act.t)] : 0,
       r3(p.cd.zap), r3(p.cd.tail), r3(p.cd.quick), r3(p.quickT), p.quickDir, r3(p.stun), p.stunKind, p.knocked ? 1 : 0, r3(p.iframes),
-      p.trail.map((g) => [r1(g.x), r1(g.y), g.flip ? 1 : 0, r3(g.a)]), p.score, r1(p.vy),
+      p.trail.map((g) => [r1(g.x), r1(g.y), g.flip ? 1 : 0, r3(g.a)]), p.score, r1(p.vy), Math.round(p.squash * 100) / 100,
     ]),
     s: [r1(S.x), r1(S.y), r1(S.vx), r1(S.vy), S.state, r3(S.smash), S.trail.map((t) => [r1(t.x), r1(t.y)])],
     b: bolts.map((b) => [r1(b.x), r1(b.y), b.vx, b.seed]),
@@ -1285,6 +1318,7 @@ function applyState(d) {
     p.iframes = a[14];
     p.trail = a[15].map(([x, y, f, al]) => ({ x, y, flip: !!f, a: al }));
     p.score = a[16];
+    p.squash = a[18] ?? 0;
   });
   [S.x, S.y, S.vx, S.vy, S.state, S.smash] = d.s;
   S.trail = d.s[6].map(([x, y]) => ({ x, y }));
@@ -1320,7 +1354,7 @@ function applyState(d) {
 // When the host moves 2P itself (a hit, a stun, a new rally) it bumps an epoch and the guest snaps to it.
 const INTERP = 0.05;
 const guest = { snaps: [], offs: [], latest: null, sendAt: 0 };
-const own = { epoch: -1, follow: true, n: 0, x: 288, y: FLOOR, vx: 0, vy: 0, ground: true, face: -1, quickT: 0, quickDir: null, cd: { zap: 0, quick: 0 }, act: null, trail: [] };
+const own = { epoch: -1, follow: true, n: 0, squash: 0, x: 288, y: FLOOR, vx: 0, vy: 0, ground: true, face: -1, quickT: 0, quickDir: null, cd: { zap: 0, quick: 0 }, act: null, trail: [] };
 function resetGuest() {
   Object.assign(guest, { snaps: [], offs: [], latest: null });
   Object.assign(own, { epoch: -1, follow: true, act: null, trail: [] });
@@ -1385,6 +1419,8 @@ function predictSelf(dt) {
   for (const g of p.trail) g.a -= dt * 4;
   p.trail = p.trail.filter((g) => g.a > 0).slice(-6);
   if (p.act && (p.act.t += dt) >= (p.act.type === "zap" ? ZAP.dur : BASIC.dur)) p.act = null;
+  const squashTo = p.ground && st !== "title" && st !== "over" && has(c.down) ? 1 : 0;
+  p.squash += (squashTo - p.squash) * Math.min(1, dt * SQUASH.rate);
 }
 function sendSelf(now) {
   if (own.follow || own.epoch < 0 || !net.state?.open || now - guest.sendAt < 15) return;
@@ -1415,7 +1451,7 @@ function showGuest(now) {
   [P2.stun, P2.stunKind, P2.knocked, P2.iframes] = [L[11], L[12], !!L[13], L[14]];
   if (!own.follow) {
     // our own Pikachu, where we predict it (while the host moves us after a hit, its smoothed 2P is shown instead)
-    Object.assign(P2, { x: own.x, y: own.y, vx: own.vx, face: own.face, ground: own.ground, quickT: own.quickT, quickDir: own.quickDir, trail: own.trail });
+    Object.assign(P2, { x: own.x, y: own.y, vx: own.vx, face: own.face, ground: own.ground, quickT: own.quickT, quickDir: own.quickDir, trail: own.trail, squash: own.squash });
     P2.cd = { ...P2.cd, zap: own.cd.zap, quick: own.cd.quick };
     // our swing shows at once; an Iron Tail (decided by the host when a jump swing meets the shuttle) shows from the host
     P2.act = L[5] && L[5][0] === "tail" ? { type: "tail", t: L[5][1] } : own.act;
@@ -1697,4 +1733,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, isMacChrome, own, guest, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, snapshot, natType, ai, setAI, toTitle, isMacChrome, own, guest, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
