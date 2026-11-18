@@ -27,7 +27,7 @@ const DT = 1 / 60;
 const BASIC = { dur: 0.26, on: 0.03, off: 0.16, reachS: 21, reachP: 14 };
 const TAIL = { dur: 0.5, on: 0.12, off: 0.3, cd: 1.6, reachS: 24, reachP: 19 };
 const ZAP = { dur: 0.24, fire: 0.07, cd: 1.2, speed: 250 };
-const QUICK = { dur: 0.15, speed: 470, up: 430, cd: 0.9 };
+const QUICK = { dur: 0.15, speed: 470, cd: 0.9 };
 const STUN = { basic: 0.2, zap: 0.5, tail: 0.5 };
 
 const C = (h) => hex(h);
@@ -134,7 +134,7 @@ function decodeInput(src, v) {
 const makePlayer = (id) => ({
   id, ctl: CONTROLS[id], src: LOCAL, spr: id === 1 ? SPR_P1 : SPR_P2, tag: C(id === 1 ? "#ff6b5b" : "#5bb0ff"),
   x: 0, y: FLOOR, vx: 0, vy: 0, face: id === 1 ? 1 : -1, ground: true,
-  act: null, cd: { zap: 0, tail: 0, quick: 0 }, quickT: 0, quickDir: null,
+  act: null, cd: { zap: 0, tail: 0, quick: 0 }, quickT: 0, dashX: 0, dashY: 0,
   stun: 0, stunKind: null, stunN: 0, knocked: false, knockT: 0, iframes: 0,
   trail: [], score: 0, squash: 0,
 });
@@ -341,33 +341,37 @@ function startAct(p, type) {
   if (type === "tail") p.cd.tail = TAIL.cd;
   if (type === "zap") p.cd.zap = ZAP.cd;
 }
+// the arrows held at a dash in 8 directions (none: forward). Down only counts in the air.
+function dashDir(p, dirX) {
+  const ny = pHeld(p, p.ctl.up) ? -1 : pHeld(p, p.ctl.down) && !p.ground ? 1 : 0, nx = dirX || (ny ? 0 : p.face);
+  const n = nx && ny ? Math.SQRT1_2 : 1;
+  return [nx * n, ny * n];
+}
 function startQuick(p, dirX) {
   p.cd.quick = QUICK.cd;
   p.act = null;
   p.quickT = QUICK.dur;
-  if (pHeld(p, p.ctl.up)) {
-    p.quickDir = "up";
-    p.vy = -QUICK.up;
-    p.ground = false;
-    p.vx = dirX * RUN;
-    puff(p.x, FLOOR, 5);
-  } else {
-    const d = dirX === -p.face ? -p.face : p.face;
-    p.quickDir = d;
-    p.vx = d * QUICK.speed;
-    p.vy = 0;
-    if (p.ground) puff(p.x, FLOOR, 6, -d);
-  }
+  // any of 8 directions, all at full speed and in a straight line (no gravity until it ends, see DASH8)
+  [p.dashX, p.dashY] = dashDir(p, dirX);
+  p.vx = p.dashX * QUICK.speed * pow(p);
+  p.vy = p.dashY * QUICK.speed * pow(p);
+  if (p.dashY < 0) p.ground = false;
+  if (p.ground || p.dashY < 0) puff(p.x, FLOOR, 6, -Math.sign(p.dashX));
 }
 
-// an Extreme CPU that has just won a point (or the game) gloats; it alone may still move on the game-over screen
+// a CPU that boasts (Extreme, Korean) and has just won a point (or the game) gloats; it alone may still move on the game-over screen
 const gloating = (p) =>
   ai.on && p === P2 && !!AI_LEVELS[ai.level].taunt && (game.state === "point" ? game.pointWinner : game.state === "over" ? game.winner : null) === P2;
+// how much quicker than a person this player is: the Korean CPU runs, dashes and recovers 15% faster and reaches
+// 15% further for the shuttle. Online the AI is off, so this is always 1 there.
+const pow = (p) => (ai.on && p === P2 ? AI_LEVELS[ai.level].pow ?? 1 : 1);
+// Quick Attack goes any of 8 ways. When it ends it keeps this much of its speed up or down.
+const DASH8 = { keep: 120 };
 const inPlay = (p) => (game.state !== "title" && game.state !== "over") || gloating(p);
 
 function updatePlayer(p, dt) {
   const o = other(p), c = p.ctl, dirX = (pHeld(p, c.right) ? 1 : 0) - (pHeld(p, c.left) ? 1 : 0);
-  for (const k in p.cd) p.cd[k] = Math.max(0, p.cd[k] - dt);
+  for (const k in p.cd) p.cd[k] = Math.max(0, p.cd[k] - dt * pow(p));
   p.iframes = Math.max(0, p.iframes - dt);
 
   const free = !p.knocked && p.stun <= 0;
@@ -398,18 +402,19 @@ function updatePlayer(p, dt) {
     }
     if (p.quickT > 0) {
       p.quickT -= dt;
-      if (p.quickDir === "up") p.vx = dirX * RUN * 1.2;
+      if (p.quickT <= 0) p.vy = p.dashY * DASH8.keep;
     } else {
       const k = p.act ? (p.act.type === "tail" ? (p.ground ? 0 : 0.5) : 0.55) : 1;
-      p.vx = dirX * RUN * k;
+      p.vx = dirX * RUN * k * pow(p);
     }
   }
 
   // physics
-  const dashing = p.quickT > 0 && p.quickDir !== "up";
+  const dashing = p.quickT > 0;
   if (!dashing) p.vy += GRAV * dt;
   p.x += p.vx * dt;
   p.y += p.vy * dt;
+  if (p.y < 24) (p.y = 24), (p.vy = Math.max(p.vy, 0)); // (only an 8-way dash from a jump gets this high)
   if (p.y >= FLOOR) {
     if (!p.ground && p.vy > 260) puff(p.x, FLOOR, 4);
     p.y = FLOOR;
@@ -450,7 +455,7 @@ function updatePlayer(p, dt) {
   a.t += dt;
   if (a.type === "basic" && a.t >= BASIC.on && a.t <= BASIC.off) {
     const hx = p.x + p.face * 12, hy = p.y - 18;
-    if (!a.hitS && canHitShuttle(p) && dhypot(S.x - hx, S.y - hy) < BASIC.reachS) {
+    if (!a.hitS && canHitShuttle(p) && dhypot(S.x - hx, S.y - hy) < BASIC.reachS * pow(p)) {
       a.hitS = true;
       // in the air the swing turns into Iron Tail (a smash), except on the serve: a jump serve is a normal hit
       if (p.ground || S.state === "serve") hitShuttle(p, "basic");
@@ -471,7 +476,7 @@ function updatePlayer(p, dt) {
     }
     if (a.t >= TAIL.on && a.t <= TAIL.off) {
       const hx = p.x + p.face * 14, hy = p.y - 16;
-      if (!a.hitS && canHitShuttle(p) && dhypot(S.x - hx, S.y - hy) < TAIL.reachS) ((a.hitS = true), hitShuttle(p, "tail"));
+      if (!a.hitS && canHitShuttle(p) && dhypot(S.x - hx, S.y - hy) < TAIL.reachS * pow(p)) ((a.hitS = true), hitShuttle(p, "tail"));
       if (!a.hitP && canBeHit(o) && circleBox(p.x + p.face * 16, p.y - 10, TAIL.reachP, hurtbox(o))) {
         a.hitP = true;
         stunPlayer(o, "tail", p);
@@ -571,8 +576,14 @@ const AI_LEVELS = {
   // out or into the net, and times its zaps to stun the other player just before they must hit (not now and then).
   // taunt: gloats after every point it wins, and on and on after winning the game (see tauntStep)
   extreme: { name: "EXTREME", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.35, 0.6], smart: true, taunt: true },
+  // Korean: Extreme, 15% quicker (pow, see above), and it plans further. plan: of every point on the shuttle's way
+  // it can get to, it meets it at the one where its best shot is hardest to return (not just the first).
+  // guard: while its shot is on the way, it waits where it can best reach every return they could play.
+  // dash8: it makes the most of Quick Attack going any of 8 ways (see startQuick): it dashes up or across into the
+  // air to smash a shuttle out of a jump's reach, and down to get back to the floor in a hurry.
+  korean: { name: "KOREAN", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.3, 0.5], smart: true, taunt: true, pow: 1.15, plan: true, guard: true, dash8: true },
 };
-const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, dodged: new Set() };
+const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, dodged: new Set() };
 const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
 const rand = (a, b) => a + Math.random() * (b - a);
 
@@ -612,9 +623,24 @@ function predictShuttle(maxT = 2.5, from = S) {
 // when that is harder to return than the best shot it could play from the ground.
 function aiPlan(me) {
   const path = predictShuttle(), mine = (s) => (me === P2 ? s.x > NET_X + 8 : s.x < NET_X - 8), L = AI_LEVELS[ai.level], op = other(me);
-  const reach = (s) => Math.abs(s.x - me.face * 12 - me.x) <= RUN * s.t + (L.dash && me.cd.quick <= 0 ? 70 : 0) + 14;
+  const run = RUN * pow(me), dash = L.dash && me.cd.quick <= 0 ? QUICK.speed * QUICK.dur * pow(me) : 0;
+  const reach = (s) => Math.abs(s.x - me.face * 12 - me.x) <= run * s.t + dash + 14;
   const smashIn = (i) => path.slice(i, i + 7).every((q) => tailIn(me, q));
-  const low = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32 && reach(s)) ?? path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32);
+  let low = path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32 && reach(s)) ?? path.find((s) => mine(s) && s.vy > 0 && s.y > FLOOR - 32);
+  if (L.plan && low) {
+    // of the ground meet points it can surely get to (no slack, a moment to spare, not right at the floor), the one
+    // whose best shot leaves them the least time; a later one only if clearly better, as earlier is safer
+    const sure = (s) => Math.abs(s.x - me.face * 12 - me.x) <= run * (s.t - 0.06) + dash;
+    let bestSpare = Infinity;
+    for (let i = 0; i < path.length; i += 2) {
+      const s = path[i];
+      if (!(mine(s) && s.vy > 0 && s.y > FLOOR - 32 && s.y < FLOOR - 6 && (s === low || sure(s)))) continue;
+      const shots = shotOptions(me, op, s);
+      if (!shots.length) continue;
+      const spare = Math.min(...shots.map((o) => o.spare));
+      if (spare < bestSpare - 0.03) (bestSpare = spare), (low = s);
+    }
+  }
   if (ai.wantSmash && !L.smart) {
     const high = path.find((s, i) => mine(s) && s.vy > 0 && s.y > FLOOR - 82 && s.y < FLOOR - 52 && reach(s) && smashIn(i));
     if (high) return { ...high, smash: true };
@@ -676,7 +702,68 @@ function killerShot(shots) {
   return near[(Math.random() * near.length) | 0].dir;
 }
 
-// Extreme, having won a point: gloat. Taunts: rushing over the net to whack the loser (Quick Attack, then the
+// dash8: a dash, then the swing the moment it ends (in the air it's an Iron Tail), that meets the shuttle. For each of
+// the 8 ways, where we'd be frame by frame (as updatePlayer moves us, holding nothing after the dash) against where
+// the shuttle will be, while the swing can hit; of those that smash it in, the one leaving them the least time.
+// Returns { keys, spare } or null.
+// (frames until a dash ends, counted as updatePlayer counts them down: float steps make it 10, not 9)
+const DASH_FRAMES = (() => { let q = QUICK.dur, f = 0; while (q > 0) (q -= DT), f++; return f; })();
+const DASH_WAYS = [["right"], ["left"], ["up"], ["down"], ["up", "right"], ["up", "left"], ["down", "right"], ["down", "left"]];
+function airDashSmash(me, op, path) {
+  const sp = QUICK.speed * pow(me), frames = DASH_FRAMES, reach = BASIC.reachS * pow(me) * 0.9;
+  let best = null;
+  for (const keys of DASH_WAYS) {
+    const dirX = keys.includes("right") ? 1 : keys.includes("left") ? -1 : 0, ny = keys.includes("up") ? -1 : keys.includes("down") ? 1 : 0;
+    if (ny > 0 && me.ground) continue; // (down from the floor is just a forward dash)
+    const n = dirX && ny ? Math.SQRT1_2 : 1;
+    let x = me.x, y = me.y, vx = dirX * n * sp, vy = ny * n * sp;
+    for (let f = 1; f < path.length && f <= frames + 1 + 10; f++) {
+      if (f === frames) vy = ny * n * DASH8.keep;
+      if (f > frames) (vx = 0), (vy += GRAV * DT); // the swing's frames: we hold nothing
+      x = clamp(x + vx * DT, 12, W - 12);
+      y = Math.max(24, y + vy * DT);
+      if (y >= FLOOR) break; // back on the floor: no smash
+      // the swing is pressed the frame after the dash ends and can hit from BASIC.on to BASIC.off into it. On frame f
+      // the swing has run (f - frames) frames and, as players move before the shuttle, meets it where it was after
+      // f - 1 of its steps (path[0] is after one)
+      const a = (f - frames) * DT;
+      if (a < BASIC.on || a > BASIC.off) continue;
+      const s = path[f - 2];
+      if (!s || !(me === P2 ? s.x > NET_X + 8 : s.x < NET_X - 8) || Math.hypot(s.x - (x + me.face * 12), s.y - (y - 18)) >= reach) continue;
+      const shot = shotPath(me, s, "tail");
+      if (landsIn(shot, op)) {
+        const spare = spareTime(op, shot);
+        if (!best || spare < best.spare) best = { keys, spare };
+      }
+      break; // the swing hits it here, whatever happens to it
+    }
+  }
+  return best;
+}
+
+// guard: while our shot is on its way to op, where to wait. Of the ground returns op could play from where they
+// will meet it (that land in), the spot that leaves us the most time to spare for the worst of them (nearest home
+// among equals). null when there's nothing to go on.
+function guardSpot(me, op, home) {
+  const meet = predictShuttle().find((s) => inCourtOf(op, s.x) && s.vy > 0 && s.y > FLOOR - 40);
+  if (!meet) return null;
+  const returns = ["", "fwd", "back", "down"].map((dir) => shotPath(op, meet, "basic", dir)).filter((p) => landsIn(p, me));
+  if (!returns.length) return null;
+  const run = RUN * pow(me), lo = me === P2 ? NET_X + 10 : 12, hi = me === P2 ? W - 12 : NET_X - 10;
+  let best = null, bestWorst = -Infinity;
+  for (let x = lo; x <= hi; x += 6) {
+    let worst = Infinity;
+    for (const path of returns) {
+      let spare = -Infinity;
+      for (const s of path) if (inCourtOf(me, s.x) && s.y > FLOOR - 36) spare = Math.max(spare, meet.t + s.t - Math.abs(s.x - me.face * 12 - x) / run);
+      worst = Math.min(worst, spare);
+    }
+    if (worst > bestWorst + 0.01 || (worst > bestWorst - 0.01 && Math.abs(x - home) < Math.abs(best - home))) (bestWorst = Math.max(worst, bestWorst)), (best = x);
+  }
+  return best;
+}
+
+// Extreme or Korean, having won a point: gloat. Taunts: rushing over the net to whack the loser (Quick Attack, then the
 // swing), squash spam, and wiggling side to side while squashed. After a point it picks one and the next serve
 // waits for it to finish; on the game-over screen it goes on, one after another (walking right up beside them
 // first, as there's time), until a new game starts.
@@ -750,24 +837,52 @@ function aiStep() {
     ai.err = rand(-L.aimErr, L.aimErr);
     ai.skip = S.last === op && Math.random() < L.miss;
     ai.wantSmash = Math.random() < L.smash;
+    ai.guardAt = 0;
+    ai.airDash = null;
   }
   let target = home;
+  // guard: our shot is on its way, so wait where their return is easiest to get to
+  if (L.guard && S.last === me) {
+    if (now >= ai.guardAt) (ai.guard = guardSpot(me, op, home)), (ai.guardAt = now + 0.15);
+    if (ai.guard !== null) target = ai.guard;
+  }
   if (S.last === op && now >= ai.reactAt) {
     if (!ai.plan || now >= ai.replanAt) (ai.plan = aiPlan(me)), (ai.plan && (ai.plan.at = now)), (ai.replanAt = now + 0.15);
     if (ai.plan) target = clamp(ai.plan.x - me.face * 12 + ai.err, me === P2 ? NET_X + 10 : 12, me === P2 ? W - 12 : NET_X - 10);
   }
   const dx = target - me.x, left = ai.plan ? ai.plan.t - (now - ai.plan.at) : 9;
+
+  // dash8: mid air-dash smash. Hold nothing while it flies, swing the moment it ends.
+  if (ai.airDash) {
+    if (me.act || now > ai.airDash.until || me.ground && me.quickT <= 0) ai.airDash = null;
+    else return void (me.quickT <= 0 && press("basic"));
+  }
+  // dash8: an air-dash smash that is harder to return than what we had planned (or the only way to get it)
+  if (L.dash8 && S.last === op && now >= ai.reactAt && !ai.skip && me.cd.quick <= 0 && me.quickT <= 0 && !me.act && Math.abs(S.x - me.x) < 160) {
+    if (ai.plan && ai.plan.spare === undefined)
+      ai.plan.spare = ai.plan.smash ? spareTime(op, shotPath(me, ai.plan, "tail")) : Math.min(Infinity, ...shotOptions(me, op, ai.plan).map((o) => o.spare));
+    const dash = airDashSmash(me, op, predictShuttle(0.6));
+    if (dash && (!ai.plan || dash.spare < ai.plan.spare - 0.05)) {
+      held.clear();
+      dash.keys.forEach(hold);
+      press("quick");
+      ai.airDash = { until: now + QUICK.dur + BASIC.off + 0.1 };
+      return;
+    }
+  }
+
   // (it stands still while a shot's direction is held, so walking doesn't turn it into another shot)
   if (Math.abs(dx) > 3 && now >= ai.shotUntil) hold(dx > 0 ? "right" : "left");
-  // far and running out of time: Quick Attack towards it
-  if (L.dash && ai.plan && Math.abs(dx) > 55 && left < Math.abs(dx) / RUN && me.cd.quick <= 0 && me.quickT <= 0) press("quick");
+  // far and running out of time: Quick Attack towards it (dash8, in the air: down and across, back to the floor)
+  if (L.dash && ai.plan && Math.abs(dx) > 55 && left < Math.abs(dx) / (RUN * pow(me)) && me.cd.quick <= 0 && me.quickT <= 0)
+    (L.dash8 && !me.ground && !ai.plan.smash && hold("down"), press("quick"));
   // a high one: jump so the swing meets it at the top (the swing then becomes Iron Tail)
   if (ai.plan?.smash && me.ground && Math.abs(dx) < 16 && left < 0.32 && left > 0.12) press("up");
 
   // swing when the shuttle is in reach
   // (in the air the swing is an Iron Tail: a smart AI holds it rather than smash the shuttle out)
   const hx = me.x + me.face * 12, hy = me.y - 18, tailOk = me.ground || !L.smart || tailIn(me, predictShuttle(1.5 * DT)[0] ?? S);
-  if (!ai.skip && !me.act && S.last !== me && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS * 0.95 && tailOk) {
+  if (!ai.skip && !me.act && S.last !== me && Math.hypot(S.x - hx, S.y - hy) < BASIC.reachS * pow(me) * 0.95 && tailOk) {
     if (me.ground) chooseShot(false);
     else (ai.shotKeys = []), (ai.shotUntil = 0);
     held.clear();
@@ -910,11 +1025,13 @@ function drawPlayer(p, P) {
     P.place(Math.round(g.x), Math.round(g.y), g.flip);
     P.sprite(spr.rows, pal, spr.ax, spr.ay, { tint: AFTER[p.id][step] });
   }
-  if (p.quickT > 0 && p.quickDir !== "up") {
+  if (p.quickT > 0) {
+    // speed lines trailing straight back from the dash, whichever way it goes
     P.place(0, 0);
-    for (let i = 0; i < 4; i++) {
-      const ly = p.y - 6 - i * 7, len = 10 + ((i * 7 + Math.floor(game.time * 60)) % 9);
-      P.rect(Math.round(p.x - p.quickDir * (14 + len)), Math.round(ly), len, 1, C("#fff6c8"), 0.8);
+    const cx = p.x, cy = p.y - 14, ux = -p.dashX, uy = -p.dashY;
+    for (let i = -1; i <= 1; i++) {
+      const len = 8 + ((i * 7 + 9 + Math.floor(game.time * 60)) % 9);
+      for (let k = 14; k < 14 + len; k += 2) P.rect(Math.round(cx + ux * k - uy * i * 7), Math.round(cy + uy * k + ux * i * 7), 1, 1, C("#fff6c8"), 0.8);
     }
   }
   P.place(Math.round(p.x + ox), Math.round(p.y + oy), flip);
@@ -1246,7 +1363,7 @@ function onDesync(frame) {
 }
 
 // ---- the game state: everything simStep reads and changes, as plain data (players as ids)
-const PLAYER_KEYS = ["x", "y", "vx", "vy", "face", "ground", "quickT", "quickDir", "stun", "stunKind", "stunN", "knocked", "knockT", "iframes", "score", "squash"];
+const PLAYER_KEYS = ["x", "y", "vx", "vy", "face", "ground", "quickT", "dashX", "dashY", "stun", "stunKind", "stunN", "knocked", "knockT", "iframes", "score", "squash"];
 const byId = (id) => (id === 1 ? P1 : id === 2 ? P2 : null), idOf = (p) => p?.id ?? 0;
 function saveState() {
   return {
@@ -1787,7 +1904,7 @@ const ui = (() => {
   };
 })();
 
-// ---- choosing the opponent: the AI at one of three levels, or two people on one device
+// ---- choosing the opponent: the AI at one of five levels, or two people on one device
 (() => {
   const buttons = [...document.querySelectorAll("[data-ai]")], status = document.getElementById("mode-status");
   if (!buttons.length) return;
@@ -1796,7 +1913,7 @@ const ui = (() => {
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
     status.textContent =
       net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
-      : ai.on ? `AI(${{ easy: "쉬움", normal: "보통", hard: "어려움", extreme: "극악" }[ai.level]})와 대전해요. 나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`
+      : ai.on ? `AI(${{ easy: "쉬움", normal: "보통", hard: "어려움", extreme: "극악", korean: "한국인" }[ai.level]})와 대전해요. 나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`
       : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
   };
   for (const b of buttons)
