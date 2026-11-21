@@ -26,9 +26,9 @@ const DT = 1 / 60;
 // move timings (seconds)
 const BASIC = { dur: 0.26, on: 0.03, off: 0.16, reachS: 21, reachP: 14 };
 const TAIL = { dur: 0.5, on: 0.12, off: 0.3, cd: 1.6, reachS: 24, reachP: 19 };
-const ZAP = { dur: 0.24, fire: 0.07, cd: 1.2, speed: 250 };
+const ZAP = { dur: 0.24, fire: 0.07, cd: 1.2, speed: 250, noHit: 0.3 }; // noHit: no shuttle hits this long after a zap
 const QUICK = { dur: 0.15, speed: 470, cd: 0.9 };
-const STUN = { basic: 0.2, zap: 0.5, tail: 0.5 };
+const STUN = { basic: 0.2, zap: 0.4, tail: 0.5 };
 
 const C = (h) => hex(h);
 const VOLT = fit(PAL.volt, 8);
@@ -135,7 +135,7 @@ const makePlayer = (id) => ({
   id, ctl: CONTROLS[id], src: LOCAL, spr: id === 1 ? SPR_P1 : SPR_P2, tag: C(id === 1 ? "#ff6b5b" : "#5bb0ff"),
   x: 0, y: FLOOR, vx: 0, vy: 0, face: id === 1 ? 1 : -1, ground: true,
   act: null, cd: { zap: 0, tail: 0, quick: 0 }, quickT: 0, dashX: 0, dashY: 0,
-  stun: 0, stunKind: null, stunN: 0, knocked: false, knockT: 0, iframes: 0,
+  stun: 0, stunKind: null, stunN: 0, knocked: false, knockT: 0, iframes: 0, noHit: 0,
   trail: [], score: 0, squash: 0,
 });
 const P1 = makePlayer(1), P2 = makePlayer(2), PLAYERS = [P1, P2];
@@ -155,7 +155,7 @@ function resetRally(server) {
   game.server = server;
   P1.x = 96; P2.x = 288;
   for (const p of PLAYERS) {
-    Object.assign(p, { y: FLOOR, vx: 0, vy: 0, ground: true, act: null, quickT: 0, stun: 0, stunKind: null, knocked: false, iframes: 0, trail: [] });
+    Object.assign(p, { y: FLOOR, vx: 0, vy: 0, ground: true, act: null, quickT: 0, stun: 0, stunKind: null, knocked: false, iframes: 0, noHit: 0, trail: [] });
     p.cd = { zap: 0, tail: 0, quick: 0 };
     p.face = p === P1 ? 1 : -1;
   }
@@ -339,7 +339,7 @@ function hitShuttle(p, kind) {
 function startAct(p, type) {
   p.act = { type, t: 0, hitS: false, hitP: false, fired: false, fx: false };
   if (type === "tail") p.cd.tail = TAIL.cd;
-  if (type === "zap") p.cd.zap = ZAP.cd;
+  if (type === "zap") (p.cd.zap = ZAP.cd), (p.noHit = ZAP.noHit);
 }
 // the arrows held at a dash in 8 directions (none: forward). Down only counts in the air.
 function dashDir(p, dirX) {
@@ -373,6 +373,7 @@ function updatePlayer(p, dt) {
   const o = other(p), c = p.ctl, dirX = (pHeld(p, c.right) ? 1 : 0) - (pHeld(p, c.left) ? 1 : 0);
   for (const k in p.cd) p.cd[k] = Math.max(0, p.cd[k] - dt * pow(p));
   p.iframes = Math.max(0, p.iframes - dt);
+  p.noHit = Math.max(0, p.noHit - dt);
 
   const free = !p.knocked && p.stun <= 0;
   if (p.knocked) {
@@ -497,7 +498,7 @@ function ironTail(p) {
   p.act = { type: "tail", t: TAIL.on, hitS: true, hitP: true, fired: false, fx: false };
   hitShuttle(p, "tail");
 }
-const canHitShuttle = (p) => S.state === "fly" || (S.state === "serve" && game.server === p);
+const canHitShuttle = (p) => p.noHit <= 0 && (S.state === "fly" || (S.state === "serve" && game.server === p));
 
 // ---------------------------------------------------------------- shuttle and bolts
 function followServer() {
@@ -1363,7 +1364,7 @@ function onDesync(frame) {
 }
 
 // ---- the game state: everything simStep reads and changes, as plain data (players as ids)
-const PLAYER_KEYS = ["x", "y", "vx", "vy", "face", "ground", "quickT", "dashX", "dashY", "stun", "stunKind", "stunN", "knocked", "knockT", "iframes", "score", "squash"];
+const PLAYER_KEYS = ["x", "y", "vx", "vy", "face", "ground", "quickT", "dashX", "dashY", "stun", "stunKind", "stunN", "knocked", "knockT", "iframes", "noHit", "score", "squash"];
 const byId = (id) => (id === 1 ? P1 : id === 2 ? P2 : null), idOf = (p) => p?.id ?? 0;
 function saveState() {
   return {
