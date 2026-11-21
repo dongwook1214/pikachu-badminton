@@ -393,7 +393,8 @@ function updatePlayer(p, dt) {
     if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
     if (pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
     else if (!p.act && p.quickT <= 0) {
-      if (pPressed(p, c.zap) && p.cd.zap <= 0) startAct(p, "zap");
+      // no zaps until the serve is hit
+      if (pPressed(p, c.zap) && p.cd.zap <= 0 && game.state !== "serve") startAct(p, "zap");
       else if (pPressed(p, c.basic)) startAct(p, "basic");
     }
     if (pPressed(p, c.up) && p.ground && p.quickT <= 0 && !(p.act && p.act.type === "tail")) {
@@ -1113,7 +1114,8 @@ function drawHud(P) {
     const left = p === P1, x0 = left ? 8 : W - 8 - skills.length * 30 + 6;
     P.text(tagOf(p), left ? 8 : W - 8, 9, p.tag, { font: "big", align: left ? "left" : "right", outline: INK });
     skills.forEach(([label, key, cd], i) => {
-      const x = x0 + i * 30, y = 20, ready = p.cd[key] <= 0, k = 1 - p.cd[key] / cd;
+      const locked = key === "zap" && game.state === "serve"; // zaps unlock once the serve is hit
+      const x = x0 + i * 30, y = 20, ready = p.cd[key] <= 0 && !locked, k = locked ? 0 : 1 - p.cd[key] / cd;
       P.text(label, x, y, ready ? C("#fff3a0") : C("#6c6888"), { outline: INK });
       P.rect(x, y + 7, 24, 2, C("#2a2648"));
       P.rect(x, y + 7, Math.round(24 * k), 2, ready ? VOLT[5] : C("#8a86a8"));
