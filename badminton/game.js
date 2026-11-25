@@ -369,6 +369,17 @@ const pow = (p) => (ai.on && p === P2 ? AI_LEVELS[ai.level].pow ?? 1 : 1);
 const DASH8 = { keep: 120 };
 const inPlay = (p) => (game.state !== "title" && game.state !== "over") || gloating(p);
 
+const returnFace = (p) => p === P1 ? 1 : -1;
+function updateFacing(p) {
+  if (p.act || p.quickT > 0 || p.knocked || p.stun > 0) return;
+  const dx = other(p).x - p.x;
+  // A CPU return aims at the opponent's scoring half, not at their avatar.
+  // Crossing the net is legal and doesn't change which half belongs to whom.
+  if (ai.on && p === P2 && game.state === "rally" && S.state === "fly" && S.last !== p) {
+    p.face = returnFace(p);
+  } else if (Math.abs(dx) > 1) p.face = Math.sign(dx);
+}
+
 function updatePlayer(p, dt) {
   const o = other(p), c = p.ctl, dirX = (pHeld(p, c.right) ? 1 : 0) - (pHeld(p, c.left) ? 1 : 0);
   for (const k in p.cd) p.cd[k] = Math.max(0, p.cd[k] - dt * pow(p));
@@ -390,7 +401,7 @@ function updatePlayer(p, dt) {
   }
 
   if (free && inPlay(p)) {
-    if (!p.act && p.quickT <= 0 && Math.abs(o.x - p.x) > 1) p.face = Math.sign(o.x - p.x);
+    updateFacing(p);
     if (pPressed(p, c.quick) && p.cd.quick <= 0 && p.quickT <= 0) startQuick(p, dirX);
     else if (!p.act && p.quickT <= 0) {
       // no zaps until the serve is hit
@@ -757,7 +768,7 @@ function guardSpot(me, op, home) {
     let worst = Infinity;
     for (const path of returns) {
       let spare = -Infinity;
-      for (const s of path) if (inCourtOf(me, s.x) && s.y > FLOOR - 36) spare = Math.max(spare, meet.t + s.t - Math.abs(s.x - me.face * 12 - x) / run);
+      for (const s of path) if (inCourtOf(me, s.x) && s.y > FLOOR - 36) spare = Math.max(spare, meet.t + s.t - Math.abs(s.x - returnFace(me) * 12 - x) / run);
       worst = Math.min(worst, spare);
     }
     if (worst > bestWorst + 0.01 || (worst > bestWorst - 0.01 && Math.abs(x - home) < Math.abs(best - home))) (bestWorst = Math.max(worst, bestWorst)), (best = x);
@@ -931,7 +942,11 @@ function simStep(dt) {
     return false;
   }
 
-  if (ai.on) aiStep();
+  // Use the same idle facing for AI planning and the swing it requests.
+  if (ai.on) {
+    if (game.state === "rally" && S.state === "fly" && S.last !== P2) updateFacing(P2);
+    aiStep();
+  }
   for (const p of PLAYERS) updatePlayer(p, dt);
   updateShuttle(dt);
   updateBolts(dt);
