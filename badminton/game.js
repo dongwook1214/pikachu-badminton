@@ -583,7 +583,7 @@ const AI_LEVELS = {
   // guard: while its shot is on the way, it waits where it can best reach every return they could play.
   // dash8: it makes the most of Quick Attack going any of 8 ways (see startQuick): it dashes up or across into the
   // air to smash a shuttle out of a jump's reach, and down to get back to the floor in a hurry.
-  korean: { name: "KOREAN", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.3, 0.5], smart: true, taunt: true, pow: 1.15, plan: true, guard: true, dash8: true },
+  korean: { name: "KOREAN", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.3, 0.5], smart: true, taunt: true, pow: 1.15, plan: true, guard: true, dash8: true, blockSmash: true },
 };
 const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, dodged: new Set() };
 const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
@@ -789,6 +789,24 @@ function tauntStep(me, op, now, hold, press) {
   else (hold("down"), hold(Math.floor(now / 0.22) % 2 ? "left" : "right"));
 }
 
+// BASIC becomes active on its second update, before that frame’s shuttle movement.
+// If a fast smash enters range on that frame, start an in-bounds ground reply now.
+function earlySmashBlock(me, op) {
+  if (S.last !== op || S.smash <= 0 || !me.ground || me.act || me.quickT > 0 || me.noHit > 0) return null;
+  const reach = BASIC.reachS * pow(me) * 0.95;
+  const hx = me.x + me.face * 12, hy = me.y - 18;
+  if (dhypot(S.x - hx, S.y - hy) < reach) return null; // Normal swing already covers it.
+  const [next] = predictShuttle(1.5 * DT);
+  if (!next || next.land || !inCourtOf(me, next.x)) return null;
+  const swingMove = 2 * DT * RUN * 0.55 * pow(me);
+  if (dhypot(next.x - hx, next.y - hy) >= reach + swingMove) return null;
+  return killerShot(shotOptions(me, op, next).filter(({ dir }) => {
+    const dx = dir === "fwd" ? me.face : dir === "back" ? -me.face : 0;
+    const swingX = clamp(me.x + dx * swingMove, 12, W - 12) + me.face * 12;
+    return dhypot(next.x - swingX, next.y - hy) < reach;
+  }));
+}
+
 function aiStep() {
   const me = P2, op = P1, L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
   const held = AI_SRC.held, press = (a) => AI_SRC.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
@@ -853,6 +871,18 @@ function aiStep() {
     if (ai.plan) target = clamp(ai.plan.x - me.face * 12 + ai.err, me === P2 ? NET_X + 10 : 12, me === P2 ? W - 12 : NET_X - 10);
   }
   const dx = target - me.x, left = ai.plan ? ai.plan.t - (now - ai.plan.at) : 9;
+
+  if (L.blockSmash && !ai.skip) {
+    const block = earlySmashBlock(me, op);
+    if (block !== null) {
+      ai.shotKeys = { "": [], fwd: [fwd], back: [back], down: ["down"] }[block];
+      ai.shotUntil = now + 0.22;
+      held.clear();
+      ai.shotKeys.forEach(hold);
+      press("basic");
+      return;
+    }
+  }
 
   // dash8: mid air-dash smash. Hold nothing while it flies, swing the moment it ends.
   if (ai.airDash) {
