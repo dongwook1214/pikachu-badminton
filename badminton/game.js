@@ -361,10 +361,10 @@ function startQuick(p, dirX) {
 
 // a CPU that boasts (Extreme, Korean) and has just won a point (or the game) gloats; it alone may still move on the game-over screen
 const gloating = (p) =>
-  ai.on && p === P2 && !!AI_LEVELS[ai.level].taunt && (game.state === "point" ? game.pointWinner : game.state === "over" ? game.winner : null) === P2;
+  !!brainOf(p) && !!AI_LEVELS[brainOf(p).level].taunt && (game.state === "point" ? game.pointWinner : game.state === "over" ? game.winner : null) === p;
 // how much quicker than a person this player is: the Korean CPU runs, dashes and recovers 15% faster and reaches
 // 15% further for the shuttle. Online the AI is off, so this is always 1 there.
-const pow = (p) => (ai.on && p === P2 ? AI_LEVELS[ai.level].pow ?? 1 : 1);
+const pow = (p) => (brainOf(p) ? AI_LEVELS[brainOf(p).level].pow ?? 1 : 1);
 // Quick Attack goes any of 8 ways. When it ends it keeps this much of its speed up or down.
 const DASH8 = { keep: 120 };
 const inPlay = (p) => (game.state !== "title" && game.state !== "over") || gloating(p);
@@ -375,7 +375,7 @@ function updateFacing(p) {
   const dx = other(p).x - p.x;
   // A CPU return aims at the opponent's scoring half, not at their avatar.
   // Crossing the net is legal and doesn't change which half belongs to whom.
-  if (ai.on && p === P2 && game.state === "rally" && S.state === "fly" && S.last !== p) {
+  if (brainOf(p) && game.state === "rally" && S.state === "fly" && S.last !== p) {
     p.face = returnFace(p);
   } else if (Math.abs(dx) > 1) p.face = Math.sign(dx);
 }
@@ -577,9 +577,9 @@ function updateBolts(dt) {
 }
 
 // ---------------------------------------------------------------- step
-// ---------------------------------------------------------------- AI opponent (plays 2P)
-// It presses 2P's keys through its own input source, like a third keyboard, so it follows every rule a person
-// does (cooldowns, stuns, the serve line). It reads the shuttle with the same physics the game runs.
+// ---------------------------------------------------------------- AI opponent (plays 2P; 1P too in the arena)
+// It presses its player's keys through its own input source, like another keyboard, so it follows every rule a
+// person does (cooldowns, stuns, the serve line). It reads the shuttle with the same physics the game runs.
 const AI_SRC = { held: new Set(), pressed: new Set() };
 const AI_LEVELS = {
   easy: { name: "EASY", react: 0.4, aimErr: 22, miss: 0.25, smash: 0.12, zap: 0.05, dash: false, dodge: 0.15, serveWait: [1.4, 2.2] },
@@ -600,7 +600,7 @@ for (const [id, ko] of Object.entries({ easy: "쉬움", normal: "보통", hard: 
 
 // ---- AI Unlimited: a list of AIs anyone can add to. Each one has a name and its own algorithm: the flags aiStep
 // reads (add a new flag for new behavior). All of them play at the base stats (pow 1): only the algorithm differs.
-// To contribute one, beat every AI here, then add yours at the end (see README).
+// To contribute one, add yours at the end and beat every AI here: `node tools/arena.mjs <id>` (see README).
 // name: shown in the game (pixel font, Latin letters); ko: shown on the page; by: who wrote it.
 const UNLIMITED = [
   {
@@ -609,18 +609,34 @@ const UNLIMITED = [
   },
 ];
 for (const u of UNLIMITED) AI_LEVELS[`unlimited:${u.id}`] = { ...u.algo, name: u.name, ko: u.ko, by: u.by, unlimited: true };
-const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, dodged: new Set() };
-const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
+// A brain: one AI player's level, its input source and what it remembers between frames. `ai` is 2P's (with `on`
+// telling whether 2P is an AI at all); 1P gets one only in the arena (setArena), where two AIs play each other.
+const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, taunt: null, dodged: new Set() });
+const ai = { on: false, level: "normal", src: AI_SRC, ...newMemory() };
+let p1Brain = null;
+const brainOf = (p) => (p === P2 ? (ai.on ? ai : null) : p1Brain);
+const tagOf = (p) => (brainOf(p) ? "CPU" : `${p.id}P`);
 const rand = (a, b) => a + Math.random() * (b - a);
 
 function setAI(level) {
   ai.on = !!level;
   if (level) ai.level = level;
+  Object.assign(ai, newMemory());
+  p1Brain = null;
   P2.spr = ai.on ? SPR_CPU : SPR_P2;
   AI_SRC.held.clear();
   AI_SRC.pressed.clear();
   if (ai.on) (P1.ctl = ANY), (P1.src = LOCAL), (P2.ctl = CONTROLS[2]), (P2.src = AI_SRC);
   else if (net.mode === "local") (P1.ctl = CONTROLS[1]), (P2.ctl = CONTROLS[2]), (P1.src = P2.src = LOCAL);
+}
+// AI vs AI (tools/arena.mjs): a new match from `seed`, where `p1` plays 1P and `p2` plays 2P, each with its own
+// brain. Nothing carries over from an earlier game (not even the clock), so a seed always plays out the same.
+// setAI puts 1P back in a person's hands.
+function setArena(p1, p2, seed) {
+  setAI(p2);
+  p1Brain = { level: p1, src: { held: new Set(), pressed: new Set() }, ...newMemory() };
+  (P1.ctl = CONTROLS[1]), (P1.src = p1Brain.src);
+  freshMatch(seed);
 }
 
 // where the shuttle (or one starting from `from`) will be, frame by frame, until it lands (same integrator and
@@ -648,6 +664,7 @@ function predictShuttle(maxT = 2.5, from = S) {
 // It only jumps for a smash that lands in even if the swing meets the shuttle a little late; a smart AI only
 // when that is harder to return than the best shot it could play from the ground.
 function aiPlan(me) {
+  const ai = brainOf(me);
   const path = predictShuttle(), mine = (s) => (me === P2 ? s.x > NET_X + 8 : s.x < NET_X - 8), L = AI_LEVELS[ai.level], op = other(me);
   const run = RUN * pow(me), dash = L.dash && me.cd.quick <= 0 ? QUICK.speed * QUICK.dur * pow(me) : 0;
   const reach = (s) => Math.abs(s.x - me.face * 12 - me.x) <= run * s.t + dash + 14;
@@ -795,6 +812,7 @@ function guardSpot(me, op, home) {
 // first, as there's time), until a new game starts.
 const TAUNTS = [["rush", 2.6], ["squats", 1.6], ["wiggle", 1.6]];
 function tauntStep(me, op, now, hold, press) {
+  const ai = brainOf(me);
   if (!ai.taunt) {
     const i = (Math.random() * TAUNTS.length) | 0;
     ai.taunt = { i, until: now + TAUNTS[i][1] };
@@ -831,10 +849,10 @@ function earlySmashBlock(me, op) {
   }));
 }
 
-function aiStep() {
-  const me = P2, op = P1, L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
-  const held = AI_SRC.held, press = (a) => AI_SRC.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
-  AI_SRC.pressed.clear();
+function aiStep(me) {
+  const ai = brainOf(me), op = other(me), L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
+  const held = ai.src.held, press = (a) => ai.src.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
+  ai.src.pressed.clear();
   held.clear();
   if (!gloating(me)) ai.taunt = null;
   else return void (me.stun <= 0 && !me.knocked && !game.paused && tauntStep(me, op, now, hold, press));
@@ -985,9 +1003,10 @@ function simStep(dt) {
   }
 
   // Use the same idle facing for AI planning and the swing it requests.
-  if (ai.on) {
-    if (game.state === "rally" && S.state === "fly" && S.last !== P2) updateFacing(P2);
-    aiStep();
+  for (const p of PLAYERS) {
+    if (!brainOf(p)) continue;
+    if (game.state === "rally" && S.state === "fly" && S.last !== p) updateFacing(p);
+    aiStep(p);
   }
   for (const p of PLAYERS) updatePlayer(p, dt);
   updateShuttle(dt);
@@ -1267,7 +1286,7 @@ function setMode(mode) {
   if (mode === "local") (P1.ctl = CONTROLS[1]), (P2.ctl = CONTROLS[2]), (P1.src = P2.src = LOCAL);
   else (P1.ctl = P2.ctl = CONTROLS[1]), (P1.src = NET_SRC[0]), (P2.src = NET_SRC[1]);
   // the AI only plays offline: going online sends it home, coming back brings it back if it was on
-  if (mode !== "local") (P2.spr = SPR_P2), (ai.wasOn = ai.wasOn || ai.on), (ai.on = false);
+  if (mode !== "local") (P2.spr = SPR_P2), (ai.wasOn = ai.wasOn || ai.on), (ai.on = false), (p1Brain = null);
   else if (ai.wasOn) (ai.wasOn = false), setAI(ai.level);
   ui.sync();
 }
@@ -1367,13 +1386,17 @@ function sendGameNow(buf) {
 }
 
 // ---- the match: both sides start from the same state and seed at frame 0
-function startSession(seed) {
+// both players and the game as new, on the title screen, with this seed (each player keeps whoever controls it)
+function freshMatch(seed) {
   for (const p of PLAYERS) {
     const { ctl, src, spr, tag } = p;
     Object.assign(p, makePlayer(p.id), { ctl, src, spr, tag });
   }
   Object.assign(game, { state: "title", server: P1, timer: 0, msg: null, paused: false, winner: null, pointWinner: null, time: 0, freeze: 0, shakeT: 0, shakeA: 0, rng: seed >>> 0 });
   toTitle();
+}
+function startSession(seed) {
+  freshMatch(seed);
   held.clear();
   pressed.clear();
   fxLog.seen.clear();
@@ -2073,4 +2096,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };

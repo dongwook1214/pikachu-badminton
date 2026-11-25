@@ -28,17 +28,46 @@ To change the sprite: edit `art/pikachu_pixel.py`, run `python3 art/pikachu_pixe
 
 ## AI Unlimited
 
-The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name and its own algorithm, and all of them play at the base stats (no speed boost), so only the algorithm makes one stronger than another.
+The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name and its own algorithm, and all of them play at the base stats (no speed boost), so only the algorithm makes one stronger than another. To join the list, an AI has to beat every AI already on it.
 
-To add one: beat every AI on the list, then open a pull request that adds your entry to the end of `UNLIMITED` in `game.js` (`id`, `name` for the game screen in Latin letters, `ko` for the page, `by`, and `algo`). `algo` holds the flags `aiStep` reads; for new behavior, add a new flag and the code behind it (as `blockSmash` does for `cpu`), and a test in `tests/`. `tools/korean-shutout/` is a scripted 1P that can measure an AI against a fixed opponent.
+### Adding an AI
+
+1. Add an entry to the end of `UNLIMITED` in `badminton/game.js`:
+   - `id`: lowercase letters, digits and `-`, not used by another entry
+   - `name`: shown on the game screen (pixel font: Latin letters, digits, spaces)
+   - `ko`: shown on the page
+   - `by`: your GitHub username
+   - `algo`: the flags `aiStep` reads, with `pow: 1`. Start from an existing AI (`{ ...AI_LEVELS.korean, pow: 1 }`) and add a new flag for new behavior, as `blockSmash` does for `cpu`.
+2. Write the behavior behind your flag in `aiStep` (or a function it calls), so that only an AI with that flag runs it. An AI plays only by pressing keys (`hold` and `press` in `aiStep`): it may read the game state, but must not change players, the shuttle or the score.
+3. Run the arena against every AI on the list:
+
+   ```bash
+   node tools/arena.mjs <your id>
+   ```
+
+   It plays 10 seeds, each from both sides (20 games to 11 against each opponent; the challenger serves first in half of them). Your AI **beats** an opponent when it wins more than half of their games, and it qualifies when the last line reads `PASS`. The games are seeded, so anyone running the same command gets the same results. `--seeds N` plays more games; name opponents to play only them (`node tools/arena.mjs <your id> cpu`), including the built-in levels `easy`, `normal`, `hard`, `extreme` and `korean`.
+4. Add a test of your flag in `tests/` (see `tests/unlimited.test.mjs` for `blockSmash`), and run every test:
+
+   ```bash
+   node --test 'tests/*.test.mjs'
+   ```
+
+### Pull request checklist
+
+- [ ] One new entry at the end of `UNLIMITED`, with `pow: 1`
+- [ ] The full output of `node tools/arena.mjs <your id>` in the description, ending in `PASS`
+- [ ] Existing AIs play exactly as before: `node tools/arena.mjs korean cpu` prints the same lines before and after your change
+- [ ] `node --test 'tests/*.test.mjs'` passes
+- [ ] No changes outside your AI's code, its entry and its test
+
+`tools/korean-shutout/` is a different benchmark: a scripted 1P (not an AI on the list) that plays the built-in `korean` level.
 
 ## Tests
 
 ```bash
-node tests/rollback.test.mjs
-node tests/detmath.test.mjs
+node --test 'tests/*.test.mjs'
 ```
 
-The first plays two rollback sessions against each other over a simulated network (latency, jitter, loss, Wi-Fi stalls, a hidden tab) and checks both end with exactly the same game. The second checks `detmath.js` gives the same bits in V8 (Chrome) and, on a Mac, JavaScriptCore (Safari).
+This runs every test. Among them, `rollback.test.mjs` plays two rollback sessions against each other over a simulated network (latency, jitter, loss, Wi-Fi stalls, a hidden tab) and checks both end with exactly the same game, and `detmath.test.mjs` checks `detmath.js` gives the same bits in V8 (Chrome) and, on a Mac, JavaScriptCore (Safari).
 
 Online, anything that changes the game state must give the same result in every browser: use `srand()` instead of `Math.random()`, and `detmath.js` instead of `Math.sin`, `Math.cos`, `Math.atan2` and `Math.hypot` (those differ between Chrome and Safari). New state goes in `saveState`/`loadState` too. If the two games ever drift apart anyway, a check once a second notices and the host's state is copied over.
