@@ -10,23 +10,6 @@ python3 -m http.server 8777 --directory badminton
 
 Open http://localhost:8777 in a browser. The controls are listed under the game screen.
 
-## Play online with a friend
-
-1. Send your friend the game files (share them privately, never post them publicly):
-
-   ```bash
-   zip -qr pika-badminton.zip badminton -x "*.DS_Store"
-   ```
-
-2. Your friend unzips the file and starts it with the same command as above.
-3. Host: press **방 만들기** (Create room) and send your friend the 5-letter code. Friend: enter the code and press **참가** (Join).
-
-Both browsers run the whole game and send each other only key presses (rollback netcode, the GGPO approach, in `rollback.js`). Your own Pikachu reacts at once; the friend's keys are guessed until they arrive, and when a guess was wrong the game rewinds to that frame and replays it before the next screen is drawn. Both screens show the same game, neither one behind the other, and a short Wi-Fi hiccup (100-200 ms) does not stop play. On the same network there is no input delay at all; on a slower link it adds 1-3 frames on its own.
-
-Connections go browser-to-browser over WebRTC, and the free public PeerJS server handles setup, so an internet connection is required. The game's packets use their own unordered, never-retransmitted channel on that connection, so a lost packet never holds up the next one.
-
-For testing, add to the address: `?netsim=lag:40,jitter:20,loss:0.05,spikes:0.01` delays, scatters and drops this side's game packets (ms; loss and spikes are chances per packet), and `?delay=0` fixes the input delay in frames. Hover over the ping to see the input delay, rewinds and waits so far.
-
 ## Layout
 
 ```
