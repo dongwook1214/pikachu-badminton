@@ -1991,19 +1991,27 @@ const ui = (() => {
 // device. The AI Unlimited button opens the list and picks its last choice (the first AI to begin with).
 (() => {
   const list = document.getElementById("unlimited-list"), panel = document.getElementById("unlimited");
+  // newest first: each AI joined by beating every one before it, so the newest is ranked 1 (gold, then silver, bronze)
+  const ranked = [...UNLIMITED].reverse();
   if (list) {
-    for (const u of UNLIMITED) {
-      const b = document.createElement("button");
+    ranked.forEach((u, i) => {
+      const b = document.createElement("button"), medal = document.createElement("span"), who = document.createElement("span");
       b.dataset.ai = `unlimited:${u.id}`;
       b.className = "ai-pick";
-      b.append(Object.assign(document.createElement("strong"), { textContent: u.ko }), Object.assign(document.createElement("span"), { className: "by", textContent: `by ${u.by}` }));
+      medal.className = `medal${i < 3 ? ` m${i + 1}` : ""}`;
+      medal.textContent = i + 1;
+      medal.setAttribute("aria-label", `${i + 1}위`);
+      who.className = "who";
+      who.append(Object.assign(document.createElement("strong"), { textContent: u.ko }), Object.assign(document.createElement("span"), { className: "by", textContent: `by ${u.by}` }));
+      b.append(medal, who);
       list.append(b);
-    }
+    });
   }
+  const rankOf = (level) => ranked.findIndex((u) => `unlimited:${u.id}` === level) + 1;
   const buttons = [...document.querySelectorAll("[data-ai]")], status = document.getElementById("mode-status");
   if (!buttons.length) return;
   const openUnlimited = document.querySelector("[data-unlimited]");
-  let lastUnlimited = `unlimited:${UNLIMITED[0].id}`;
+  let lastUnlimited = `unlimited:${ranked[0].id}`;
   const show = () => {
     const level = net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null, L = AI_LEVELS[level];
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
@@ -2012,7 +2020,7 @@ const ui = (() => {
     const start = `나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`;
     status.textContent =
       net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
-      : L?.unlimited ? `AI Unlimited: ${L.ko}(by ${L.by})와 대전해요. ${start}`
+      : L?.unlimited ? `AI Unlimited ${rankOf(level)}위 ${L.ko}(by ${L.by})와 대전해요. ${start}`
       : ai.on ? `AI(${L.ko})와 대전해요. ${start}`
       : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
   };

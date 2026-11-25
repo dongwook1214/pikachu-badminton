@@ -113,7 +113,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   .seg button { background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; }
   .seg button:hover:not(:disabled) { background: #2e2a4a; }
   .seg button[aria-pressed="true"] { background: #ffd23c; color: #1a1408; border-color: #ffd23c; }
-  /* AI Unlimited: the mode's blurb and its list of AIs, each a name and its author */
+  /* AI Unlimited: the mode's blurb and its list of AIs, newest (strongest) first, each its rank, name and author */
   #unlimited { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2a2640; }
   #unlimited[hidden] { display: none; }
   .unlimited-about { color: #c8c4dc; font-size: 13px; }
@@ -122,11 +122,26 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   .unlimited-about a { color: #ffe066; overflow-wrap: anywhere; }
   #unlimited-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; margin-top: 10px; }
   .ai-pick {
-    display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; font-weight: 400;
-    background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; padding: 8px 12px;
+    display: flex; align-items: center; gap: 12px; text-align: left; font-weight: 400;
+    background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; padding: 10px 12px;
   }
   .ai-pick:hover:not(:disabled) { background: #2e2a4a; }
-  .ai-pick strong { font-size: 15px; }
+  .ai-pick .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .ai-pick strong { font-size: 15px; overflow-wrap: anywhere; }
+  /* the rank: a plain disc, or for the top three a medal (gold, silver, bronze) hanging from a ribbon */
+  .medal {
+    position: relative; flex: none; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%;
+    font: 700 15px/1 ui-monospace, monospace; color: #c8c4dc; background: #1a1830; border: 2px solid #3a3658;
+  }
+  .medal.m1, .medal.m2, .medal.m3 { margin-top: 10px; border: 0; color: var(--ink); background: radial-gradient(circle at 35% 30%, var(--shine) 0 18%, var(--face) 55%, var(--edge) 100%); box-shadow: inset 0 0 0 2px var(--edge), inset 0 0 0 4px var(--face), inset 0 0 0 5px var(--edge), 0 2px 4px #0008; }
+  .medal.m1::before, .medal.m2::before, .medal.m3::before {
+    content: ""; position: absolute; z-index: -1; left: 8px; top: -12px; width: 18px; height: 16px;
+    background: linear-gradient(90deg, var(--rib) 0 33%, #f2eee2 33% 66%, var(--rib) 66%); clip-path: polygon(0 0, 100% 0, 100% 60%, 50% 100%, 0 60%);
+  }
+  .ai-pick { isolation: isolate; }
+  .medal.m1 { --shine: #fff6c2; --face: #f4c430; --edge: #a8780a; --ink: #4a3300; --rib: #d64545; }
+  .medal.m2 { --shine: #ffffff; --face: #c9d1dc; --edge: #7c8696; --ink: #2c323c; --rib: #3c74d6; }
+  .medal.m3 { --shine: #ffe0c4; --face: #d08a4e; --edge: #8a4f22; --ink: #3a1f08; --rib: #3a9a5a; }
   .ai-pick .by { color: #9a96b0; font-size: 12px; }
   .ai-pick[aria-pressed="true"] { background: #2a2412; border-color: #ffd23c; }
   .ai-pick[aria-pressed="true"] strong { color: #ffd23c; }

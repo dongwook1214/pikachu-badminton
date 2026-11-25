@@ -28,7 +28,7 @@ To change the sprite: edit `art/pikachu_pixel.py`, run `python3 art/pikachu_pixe
 
 ## AI Unlimited
 
-The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name and its own algorithm, and all of them play at the base stats (no speed boost), so only the algorithm makes one stronger than another. To join the list, an AI has to beat every AI already on it.
+The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name and its own algorithm, and all of them play at the base stats (no speed boost), so only the algorithm makes one stronger than another. To join the list, an AI has to beat every AI already on it. The page shows the list newest first and ranks it 1, 2, 3, ... (gold, silver and bronze medals for the top three): the newest AI beat every one before it, so it is ranked 1.
 
 ### Adding an AI
 
