@@ -95,6 +95,7 @@ Helpers the built-in AIs use, all in `game.js`:
 - [ ] No changes outside your AI's code, its entry, the starting values it adds to `newMemory()` and its test
 - [ ] Your code follows the rules for AI code above
 - [ ] If an AI model helped, an `// AI: <model and version>` comment above your entry and above your code
+- [ ] `dongwook1214` requested as a reviewer (`gh pr create --reviewer dongwook1214`). GitHub may not let you request reviewers on someone else's repository; then write `@dongwook1214` in the description instead
 
 `tools/korean-shutout/` is a different benchmark: a scripted 1P (not an AI on the list) that plays the built-in `korean` level.
 
