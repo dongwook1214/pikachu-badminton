@@ -602,7 +602,10 @@ for (const [id, ko] of Object.entries({ easy: "쉬움", normal: "보통", hard: 
 // reads (add a new flag for new behavior). All of them play at the base stats (pow 1): only the algorithm differs.
 // To contribute one, add yours at the end and beat every AI here: `node tools/arena.mjs <id>` (see README).
 // name: shown in the game (pixel font, Latin letters); ko: shown on the page; by: who wrote it.
+// If an AI model helped write one, a comment above its entry (and above the code behind its flag) names the model
+// and its version: `// AI: <model and version>`.
 const UNLIMITED = [
+  // AI: GPT-6.2 Sol (OpenAI), effort: high
   {
     id: "cpu", name: "CPU", ko: "cpu", by: "yhc125",
     algo: { ...AI_LEVELS.korean, pow: 1, blockSmash: true },
@@ -831,6 +834,7 @@ function tauntStep(me, op, now, hold, press) {
   else (hold("down"), hold(Math.floor(now / 0.22) % 2 ? "left" : "right"));
 }
 
+// AI: GPT-6.2 Sol (OpenAI), effort: high
 // blockSmash: a basic swing can only hit from its second update on, so a fast, low smash can come into reach and
 // land in between. If the shuttle will be in reach a frame from now (counting the step the swing takes), start the
 // swing now, with the hardest-to-return ground shot that still meets it and lands in. Returns that shot's direction,

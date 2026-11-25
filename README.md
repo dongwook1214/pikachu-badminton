@@ -32,7 +32,7 @@ The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name
 
 ### Adding an AI
 
-If you are an AI agent making a contribution, read this whole section first, follow the steps in order, and don't submit a pull request unless the arena prints `PASS`. You need Node.js 22 or newer (the test command below uses a file pattern that older versions don't support).
+If you are an AI agent making a contribution, read this whole section first, follow the steps in order, and don't submit a pull request unless the arena prints `PASS`. Write your own model name and version in the comments step 3 asks for. You need Node.js 22 or newer (the test command below uses a file pattern that older versions don't support).
 
 1. Add an entry to the end of `UNLIMITED` in `badminton/game.js`:
    - `id`: lowercase letters, digits and `-`, not used by another entry
@@ -41,14 +41,23 @@ If you are an AI agent making a contribution, read this whole section first, fol
    - `by`: your GitHub username
    - `algo`: the flags `aiStep` reads, with `pow: 1`. Start from an existing AI (`{ ...AI_LEVELS.korean, pow: 1 }`) and add a new flag for new behavior, as `blockSmash` does for `cpu`.
 2. Write the behavior behind your flag in `aiStep` (or a function it calls), so that only an AI with that flag runs it. An AI plays only by pressing keys (`hold` and `press` in `aiStep`): it may read the game state, but must not change players, the shuttle or the score.
-3. Run the arena against every AI on the list:
+3. If an AI model helped write any of it (the algorithm, the code or the test), say which one in a comment right above your entry and right above the code behind your flag, with the model's name and version, and its effort or reasoning setting if it has one (list every model that helped):
+
+   ```js
+   // AI: Claude Opus 5.5
+   {
+     id: "my-ai", name: "MY AI", ko: "내 AI", by: "my-github-name",
+     algo: { ...AI_LEVELS.korean, pow: 1, myFlag: true },
+   },
+   ```
+4. Run the arena against every AI on the list:
 
    ```bash
    node tools/arena.mjs <your id>
    ```
 
    It plays 10 seeds, each from both sides (20 games to 11 against each opponent; the challenger serves first in half of them). Your AI **beats** an opponent when it wins more than half of their games, and it qualifies when the last line reads `PASS`. The games are seeded, so anyone running the same command gets the same results. `--seeds N` plays more games; name opponents to play only them (`node tools/arena.mjs <your id> cpu`), including the built-in levels `easy`, `normal`, `hard`, `extreme` and `korean`.
-4. Add a test of your flag in `tests/` (see `tests/unlimited.test.mjs` for `blockSmash`), and run every test:
+5. Add a test of your flag in `tests/` (see `tests/unlimited.test.mjs` for `blockSmash`), and run every test:
 
    ```bash
    node --test 'tests/*.test.mjs'
@@ -85,6 +94,7 @@ Helpers the built-in AIs use, all in `game.js`:
 - [ ] `node --test 'tests/*.test.mjs'` passes
 - [ ] No changes outside your AI's code, its entry, the starting values it adds to `newMemory()` and its test
 - [ ] Your code follows the rules for AI code above
+- [ ] If an AI model helped, an `// AI: <model and version>` comment above your entry and above your code
 
 `tools/korean-shutout/` is a different benchmark: a scripted 1P (not an AI on the list) that plays the built-in `korean` level.
 
