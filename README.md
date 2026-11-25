@@ -32,6 +32,8 @@ The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name
 
 ### Adding an AI
 
+If you are an AI agent making a contribution, read this whole section first, follow the steps in order, and don't submit a pull request unless the arena prints `PASS`. You need Node.js 22 or newer (the test command below uses a file pattern that older versions don't support).
+
 1. Add an entry to the end of `UNLIMITED` in `badminton/game.js`:
    - `id`: lowercase letters, digits and `-`, not used by another entry
    - `name`: shown on the game screen (pixel font: Latin letters, digits, spaces)
@@ -52,13 +54,37 @@ The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name
    node --test 'tests/*.test.mjs'
    ```
 
+### Rules for AI code
+
+The arena only works if every AI follows these:
+
+- **Play from either side.** In the arena your AI plays 1P in half the games, so `me` may be `P1` or `P2`. Get the other player with `other(me)`, your court with `inCourtOf(me, x)`, and never assume `me === P2` or a fixed direction.
+- **Keep memory in the brain.** In `aiStep`, `ai` is this player's brain (`brainOf(me)`): its own memory, separate from the other player's and reset at the start of every arena game. Put anything your AI remembers between frames there, and add its starting value to `newMemory()`. Don't keep state in module-level variables: both AIs would share it, and it would carry over from one game to the next.
+- **Randomness comes from `Math.random()` only.** The arena seeds it, so games repeat exactly. Don't use `Date.now()`, `performance.now()` or anything else that changes between runs; for time, use `game.time`.
+- **Only press keys.** Read anything you like (`P1`, `P2`, `S` the shuttle, `bolts`, `game`), but change nothing: no setting positions, velocities, cooldowns or scores.
+- **Keep it quick.** `aiStep` runs 60 times per game second for each AI. The arena counts a game still going after 10 minutes of play as unfinished (a win for neither side).
+- **Leave the rest alone.** Don't change other entries, the order of `UNLIMITED`, the built-in levels, the arena or other tests.
+
+### How an AI plays
+
+Once per frame (1/60 s), before the players move, the game calls `aiStep(me)` for each AI player. Each call starts with no keys down; the AI holds keys for this frame with `hold(action)` and presses them once with `press(action)`. Actions: `left`, `right`, `up` (jump), `down`, `basic` (swing; in the air it becomes Iron Tail, a smash), `zap` (an electric bolt; not before the serve is hit) and `quick` (Quick Attack, a dash in the direction held, any of 8 ways). A swing's shot depends on the direction held as it hits: none = clear, forward (the way the player faces) = drive, back = lob, `down` = drop.
+
+Helpers the built-in AIs use, all in `game.js`:
+
+- `predictShuttle(maxT, from)`: where the shuttle will be, frame by frame, until it lands (the game's own physics)
+- `shotPath(me, s, kind, dir)` and `landsIn(path, op)`: where a shot from point `s` would go, and whether it lands in `op`'s court
+- `shotOptions(me, op, s)` and `killerShot(shots)`: the ground shots from `s` that land in, each with the time it leaves `op` to spare, and the direction of one of the hardest to return
+- `spareTime(op, path)`: how much time `op` has to spare to reach a shot on `path`
+- `aiPlan(me)`, `guardSpot(me, op, home)`, `airDashSmash(me, op, path)`, `earlySmashBlock(me, op)`: where to meet the shuttle, where to wait, an air-dash smash, a frame-early block
+
 ### Pull request checklist
 
 - [ ] One new entry at the end of `UNLIMITED`, with `pow: 1`
 - [ ] The full output of `node tools/arena.mjs <your id>` in the description, ending in `PASS`
 - [ ] Existing AIs play exactly as before: `node tools/arena.mjs korean cpu` prints the same lines before and after your change
 - [ ] `node --test 'tests/*.test.mjs'` passes
-- [ ] No changes outside your AI's code, its entry and its test
+- [ ] No changes outside your AI's code, its entry, the starting values it adds to `newMemory()` and its test
+- [ ] Your code follows the rules for AI code above
 
 `tools/korean-shutout/` is a different benchmark: a scripted 1P (not an AI on the list) that plays the built-in `korean` level.
 
