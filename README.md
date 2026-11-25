@@ -26,6 +26,12 @@ badminton/
 
 To change the sprite: edit `art/pikachu_pixel.py`, run `python3 art/pikachu_pixel.py` from the `badminton` folder, then reload the game.
 
+## AI Unlimited
+
+The **AI Unlimited** button lists AIs anyone can contribute. Each one has a name and its own algorithm, and all of them play at the base stats (no speed boost), so only the algorithm makes one stronger than another.
+
+To add one: beat every AI on the list, then open a pull request that adds your entry to the end of `UNLIMITED` in `game.js` (`id`, `name` for the game screen in Latin letters, `ko` for the page, `by`, and `algo`). `algo` holds the flags `aiStep` reads; for new behavior, add a new flag and the code behind it (as `blockSmash` does for `cpu`), and a test in `tests/`. `tools/korean-shutout/` is a scripted 1P that can measure an AI against a fixed opponent.
+
 ## Tests
 
 ```bash

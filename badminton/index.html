@@ -113,6 +113,23 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   .seg button { background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; }
   .seg button:hover:not(:disabled) { background: #2e2a4a; }
   .seg button[aria-pressed="true"] { background: #ffd23c; color: #1a1408; border-color: #ffd23c; }
+  /* AI Unlimited: the mode's blurb and its list of AIs, each a name and its author */
+  #unlimited { margin-top: 10px; padding-top: 10px; border-top: 1px solid #2a2640; }
+  #unlimited[hidden] { display: none; }
+  .unlimited-about { color: #c8c4dc; font-size: 13px; }
+  .unlimited-about p { margin: 2px 0; }
+  .unlimited-about strong { color: #ffd23c; font-size: 14px; }
+  .unlimited-about a { color: #ffe066; overflow-wrap: anywhere; }
+  #unlimited-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; margin-top: 10px; }
+  .ai-pick {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; font-weight: 400;
+    background: #24213a; color: #e8e6f2; border: 1px solid #3a3658; padding: 8px 12px;
+  }
+  .ai-pick:hover:not(:disabled) { background: #2e2a4a; }
+  .ai-pick strong { font-size: 15px; }
+  .ai-pick .by { color: #9a96b0; font-size: 12px; }
+  .ai-pick[aria-pressed="true"] { background: #2a2412; border-color: #ffd23c; }
+  .ai-pick[aria-pressed="true"] strong { color: #ffd23c; }
   #browser-note {
     width: min(100%, 1152px); display: flex; align-items: center; gap: 12px; padding: 10px 14px;
     background: #2a2412; border: 1px solid #6b5a1e; border-radius: 8px; color: #ffe8a0;
@@ -297,10 +314,20 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
       <button data-ai="hard">AI 어려움</button>
       <button data-ai="extreme">AI 극악</button>
       <button data-ai="korean">AI 한국인</button>
+      <button data-unlimited>AI Unlimited</button>
       <button data-ai="">둘이서 (한 기기)</button>
     </span>
   </div>
   <div class="row status-row"><span id="mode-status" class="muted"></span></div>
+  <div id="unlimited" hidden>
+    <div class="unlimited-about">
+      <p><strong>더 강력한 AI와 싸울 수 있는 모드! 끝없는 여정!!!</strong></p>
+      <p>참가자는 사람, AI, 심지어 당신의 강아지! 모두가 될 수 있습니다.</p>
+      <p>AI는 알고리즘을 만들어 싸웁니다. 만약 현재 있는 모든 AI를 이긴다면 "<a href="https://github.com/dongwook1214/pikachu-badminton" target="_blank" rel="noopener">github.com/dongwook1214/pikachu-badminton</a>"에 그 알고리즘을 기여할 수 있습니다.</p>
+      <p>알고리즘과 이름을 제출해 주세요. 많은 기여를 바랍니다.</p>
+    </div>
+    <div id="unlimited-list" role="group" aria-label="AI Unlimited 상대 고르기"></div>
+  </div>
 </div>
 <div class="card online">
   <div class="row">

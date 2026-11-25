@@ -596,6 +596,19 @@ const AI_LEVELS = {
   // air to smash a shuttle out of a jump's reach, and down to get back to the floor in a hurry.
   korean: { name: "KOREAN", react: 0, aimErr: 0, miss: 0, smash: 1, zap: 0, dash: true, dodge: 1, serveWait: [0.3, 0.5], smart: true, taunt: true, pow: 1.15, plan: true, guard: true, dash8: true },
 };
+for (const [id, ko] of Object.entries({ easy: "쉬움", normal: "보통", hard: "어려움", extreme: "극악", korean: "한국인" })) AI_LEVELS[id].ko = ko;
+
+// ---- AI Unlimited: a list of AIs anyone can add to. Each one has a name and its own algorithm: the flags aiStep
+// reads (add a new flag for new behavior). All of them play at the base stats (pow 1): only the algorithm differs.
+// To contribute one, beat every AI here, then add yours at the end (see README).
+// name: shown in the game (pixel font, Latin letters); ko: shown on the page; by: who wrote it.
+const UNLIMITED = [
+  {
+    id: "cpu", name: "CPU", ko: "cpu", by: "yhc125",
+    algo: { ...AI_LEVELS.korean, pow: 1, blockSmash: true },
+  },
+];
+for (const u of UNLIMITED) AI_LEVELS[`unlimited:${u.id}`] = { ...u.algo, name: u.name, ko: u.ko, by: u.by, unlimited: true };
 const ai = { on: false, level: "normal", plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, dodged: new Set() };
 const tagOf = (p) => (ai.on && p === P2 ? "CPU" : `${p.id}P`);
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -800,6 +813,24 @@ function tauntStep(me, op, now, hold, press) {
   else (hold("down"), hold(Math.floor(now / 0.22) % 2 ? "left" : "right"));
 }
 
+// blockSmash: a basic swing can only hit from its second update on, so a fast, low smash can come into reach and
+// land in between. If the shuttle will be in reach a frame from now (counting the step the swing takes), start the
+// swing now, with the hardest-to-return ground shot that still meets it and lands in. Returns that shot's direction,
+// or null when the ordinary swing already covers it or no such shot exists.
+function earlySmashBlock(me, op) {
+  if (S.last !== op || S.smash <= 0 || !me.ground || me.act || me.quickT > 0 || me.noHit > 0) return null;
+  const reach = BASIC.reachS * pow(me) * 0.95, hx = me.x + me.face * 12, hy = me.y - 18;
+  if (dhypot(S.x - hx, S.y - hy) < reach) return null; // in reach already: the ordinary swing handles it
+  const [next] = predictShuttle(1.5 * DT);
+  if (!next || next.land || !inCourtOf(me, next.x)) return null;
+  const swingMove = 2 * DT * RUN * 0.55 * pow(me); // how far holding a direction moves us before the swing can hit
+  if (dhypot(next.x - hx, next.y - hy) >= reach + swingMove) return null;
+  return killerShot(shotOptions(me, op, next).filter(({ dir }) => {
+    const dx = dir === "fwd" ? me.face : dir === "back" ? -me.face : 0;
+    return dhypot(next.x - (clamp(me.x + dx * swingMove, 12, W - 12) + me.face * 12), next.y - hy) < reach;
+  }));
+}
+
 function aiStep() {
   const me = P2, op = P1, L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
   const held = AI_SRC.held, press = (a) => AI_SRC.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
@@ -809,6 +840,7 @@ function aiStep() {
   else return void (me.stun <= 0 && !me.knocked && !game.paused && tauntStep(me, op, now, hold, press));
   if (game.state === "title" || game.state === "over" || game.paused || me.stun > 0 || me.knocked) return;
   const fwd = me.face > 0 ? "right" : "left", back = me.face > 0 ? "left" : "right";
+  const keysFor = (dir) => ({ "": [], fwd: [fwd], back: [back], down: ["down"] })[dir];
   const home = me === P2 ? 290 : 94;
 
   // a shot is out: keep its direction key down until the swing is over
@@ -826,7 +858,7 @@ function aiStep() {
         : ["", "fwd", "back", "down"][(r * 4) | 0];
       if (ok.length && !ok.includes(dir)) dir = ok[(Math.random() * ok.length) | 0];
     }
-    ai.shotKeys = { "": [], fwd: [fwd], back: [back], down: ["down"] }[dir];
+    ai.shotKeys = keysFor(dir);
     ai.shotUntil = now + 0.22;
   };
 
@@ -864,6 +896,16 @@ function aiStep() {
     if (ai.plan) target = clamp(ai.plan.x - me.face * 12 + ai.err, me === P2 ? NET_X + 10 : 12, me === P2 ? W - 12 : NET_X - 10);
   }
   const dx = target - me.x, left = ai.plan ? ai.plan.t - (now - ai.plan.at) : 9;
+
+  // blockSmash: swing a frame early at a fast smash that would otherwise get past
+  const block = L.blockSmash && !ai.skip ? earlySmashBlock(me, op) : null;
+  if (block !== null) {
+    ai.shotKeys = keysFor(block);
+    ai.shotUntil = now + 0.22;
+    held.clear();
+    ai.shotKeys.forEach(hold);
+    return void press("basic");
+  }
 
   // dash8: mid air-dash smash. Hold nothing while it flies, swing the moment it ends.
   if (ai.airDash) {
@@ -1166,7 +1208,7 @@ function drawOverlay(P) {
     P.glow(W / 2, 70, 90, VOLT[4], 0.15);
     if (Math.floor(game.time * 2) % 2) P.text("PRESS ENTER", W / 2, 128, C("#fff3a0"), { font: "big", align: "center", outline: INK });
     P.text(`FIRST TO ${WIN}`, W / 2, 144, C("#9a96b0"), { align: "center", outline: INK });
-    if (ai.on) P.text(`VS CPU - ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
+    if (ai.on) P.text(`${AI_LEVELS[ai.level].unlimited ? "AI UNLIMITED - VS" : "VS CPU -"} ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
     if (net.mode !== "local") P.text(`ONLINE - YOU ARE ${myId()}P`, W / 2, 168, C("#ffffff"), { align: "center", outline: INK });
   } else if (game.state === "over") {
     P.rect(W / 2 - 90, 58, 180, 70, INK);
@@ -1922,26 +1964,45 @@ const ui = (() => {
   };
 })();
 
-// ---- choosing the opponent: the AI at one of five levels, or two people on one device
+// ---- choosing the opponent: the AI at one of five levels, an AI from the AI Unlimited list, or two people on one
+// device. The AI Unlimited button opens the list and picks its last choice (the first AI to begin with).
 (() => {
+  const list = document.getElementById("unlimited-list"), panel = document.getElementById("unlimited");
+  if (list) {
+    for (const u of UNLIMITED) {
+      const b = document.createElement("button");
+      b.dataset.ai = `unlimited:${u.id}`;
+      b.className = "ai-pick";
+      b.append(Object.assign(document.createElement("strong"), { textContent: u.ko }), Object.assign(document.createElement("span"), { className: "by", textContent: `by ${u.by}` }));
+      list.append(b);
+    }
+  }
   const buttons = [...document.querySelectorAll("[data-ai]")], status = document.getElementById("mode-status");
   if (!buttons.length) return;
+  const openUnlimited = document.querySelector("[data-unlimited]");
+  let lastUnlimited = `unlimited:${UNLIMITED[0].id}`;
   const show = () => {
-    const level = net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null;
+    const level = net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null, L = AI_LEVELS[level];
     for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
+    if (openUnlimited) openUnlimited.setAttribute("aria-pressed", String(!!L?.unlimited));
+    if (panel) panel.hidden = !L?.unlimited;
+    const start = `나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`;
     status.textContent =
       net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
-      : ai.on ? `AI(${{ easy: "쉬움", normal: "보통", hard: "어려움", extreme: "극악", korean: "한국인" }[ai.level]})와 대전해요. 나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`
+      : L?.unlimited ? `AI Unlimited: ${L.ko}(by ${L.by})와 대전해요. ${start}`
+      : ai.on ? `AI(${L.ko})와 대전해요. ${start}`
       : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
   };
-  for (const b of buttons)
-    b.onclick = () => {
-      if (net.peer) leave(true); // leaving an online room to play here
-      setAI(b.dataset.ai || null);
-      toTitle();
-      show();
-      b.blur(); // so Enter/Space go to the game, not back to this button
-    };
+  const pick = (b, level) => {
+    if (net.peer) leave(true); // leaving an online room to play here
+    if (AI_LEVELS[level]?.unlimited) lastUnlimited = level;
+    setAI(level);
+    toTitle();
+    show();
+    b.blur(); // so Enter/Space go to the game, not back to this button
+  };
+  for (const b of buttons) b.onclick = () => pick(b, b.dataset.ai || null);
+  if (openUnlimited) openUnlimited.onclick = () => pick(openUnlimited, lastUnlimited);
   // a phone has one player: start against the AI
   if (TOUCH) setAI("normal");
   show();
@@ -2012,4 +2073,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
