@@ -145,6 +145,9 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
   .ai-pick .by { color: #9a96b0; font-size: 12px; }
   .ai-pick[aria-pressed="true"] { background: #2a2412; border-color: #ffd23c; }
   .ai-pick[aria-pressed="true"] strong { color: #ffd23c; }
+  /* AI vs AI: which side each picked AI plays */
+  .ai-pick .side { margin-left: auto; flex: none; font: 700 13px/1 ui-monospace, monospace; color: #1a1408; background: #ffd23c; border-radius: 4px; padding: 4px 6px; }
+  .ai-pick .side[hidden] { display: none; }
   #browser-note {
     width: min(100%, 1152px); display: flex; align-items: center; gap: 12px; padding: 10px 14px;
     background: #2a2412; border: 1px solid #6b5a1e; border-radius: 8px; color: #ffe8a0;
@@ -330,6 +333,7 @@ j=d.createElement(s),dl=l!='dataLayer'?'&l='+l:'';j.async=true;j.src=
       <button data-ai="extreme">AI 극악</button>
       <button data-ai="korean">AI 한국인</button>
       <button data-unlimited>AI Unlimited</button>
+      <button data-arena>AI vs AI</button>
       <button data-ai="">둘이서 (한 기기)</button>
     </span>
   </div>

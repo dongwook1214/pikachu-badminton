@@ -612,6 +612,11 @@ const UNLIMITED = [
     id: "cpu", name: "CPU", ko: "cpu", by: "yhc125",
     algo: { ...AI_LEVELS.korean, pow: 1, blockSmash: true },
   },
+  // AI: Claude Opus 5.5
+  {
+    id: "dragon", name: "DRAGON", ko: "드래곤", by: "dongwook1214",
+    algo: { ...AI_LEVELS.korean, pow: 1, lookahead: true },
+  },
   // AI: GPT-6.2 Sol (OpenAI), effort: xhigh
   {
     id: "return-blend", name: "RETURN BLEND", ko: "리턴 블렌드", by: "yhc125",
@@ -621,11 +626,12 @@ const UNLIMITED = [
 for (const u of UNLIMITED) AI_LEVELS[`unlimited:${u.id}`] = { ...u.algo, name: u.name, ko: u.ko, by: u.by, unlimited: true };
 // A brain: one AI player's level, its input source and what it remembers between frames. `ai` is 2P's (with `on`
 // telling whether 2P is an AI at all); 1P gets one only in the arena (setArena), where two AIs play each other.
-const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, taunt: null, dodged: new Set(), returnBlend: null });
+const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, taunt: null, dodged: new Set(), lookSeed: 0, returnBlend: null });
 const ai = { on: false, level: "normal", src: AI_SRC, ...newMemory() };
 let p1Brain = null;
 const brainOf = (p) => (p === P2 ? (ai.on ? ai : null) : p1Brain);
-const tagOf = (p) => (brainOf(p) ? "CPU" : `${p.id}P`);
+// in AI vs AI (both sides AI) each player goes by its AI's name
+const tagOf = (p) => (brainOf(p) ? (p1Brain ? AI_LEVELS[brainOf(p).level].name : "CPU") : `${p.id}P`);
 const rand = (a, b) => a + Math.random() * (b - a);
 
 function setAI(level) {
@@ -860,6 +866,198 @@ function earlySmashBlock(me, op) {
   }));
 }
 
+// AI: Claude Opus 5.5
+// lookahead: before each of its hits it plays out every way it could meet the shuttle and takes the one hardest to
+// return. A way to meet it: walk (to any spot it can get to in time), jump on some frame, or Quick Attack any of 8 ways
+// now, then start the swing on some frame, holding a shot's direction. lookBody plays its own body forward as
+// updatePlayer will move it; the swing meets the shuttle on the first frame it is in reach, and the shot that makes
+// (a ground shot, or Iron Tail in the air) is played out to where it lands. Of the shots that land in, it takes the
+// one leaving the other player the least time to spare (lookSpare: their run or Quick Attack, the jump a high shuttle
+// needs, any stun). Between its hits it waits fairly close to the net, where it can jump to smash a return before it
+// gets deep; it serves from its service line and hops over bolts.
+const LOOK = { frames: 90, jumpUntil: 46, wait: 82, waitNear: 68, serveAt: 58, receiveAt: 87, vary: 0.06 };
+const LOOK_KEYS = ["", "fwd", "back", "down"];
+const LOOK_DASHES = [[1, 0], [-1, 0], [0, -1], [1, -1], [-1, -1], [0, 1], [1, 1], [-1, 1]];
+// our body over the next n frames if we Quick Attack now ({ dash: [x, y] }), jump on some frame ({ jump: frame }) or
+// neither, walking nowhere: for each frame, our height, whether we're in the air, how far the dash has carried us,
+// how far we could have walked by then, and whether a swing pressed on that frame would start
+function lookBody(me, mode, n) {
+  let { x, y, vy, ground, quickT: q, dashY: dy } = me, vx = q > 0 ? me.vx : 0, act = me.act && { type: me.act.type, t: me.act.t };
+  let shift = 0, walk = 0, jumped = false;
+  const body = [{ y, air: !ground, shift, walk, free: false }];
+  for (let i = 1; i <= n; i++) {
+    let free = q <= 0 && !act;
+    if (i === 1 && mode.dash) {
+      const [nx, ny] = mode.dash, k = nx && ny ? Math.SQRT1_2 : 1;
+      (q = QUICK.dur), (dy = ny * k), (vx = nx * k * QUICK.speed), (vy = dy * QUICK.speed), (act = null), (free = false);
+      if (dy < 0) ground = false;
+    } else if (mode.jump === i && ground && q <= 0 && act?.type !== "tail") (vy = -JUMP_V), (ground = false), (jumped = true);
+    if (q > 0) {
+      q -= DT;
+      if (q <= 0) vy = dy * DASH8.keep;
+      shift = (x = clamp(x + vx * DT, 12, W - 12)) - me.x;
+    } else walk += RUN * DT * (act ? (act.type === "tail" ? (ground ? 0 : 0.5) : 0.55) : 1);
+    if (!(q > 0)) vy += GRAV * DT;
+    y += vy * DT;
+    if (y < 24) (y = 24), (vy = Math.max(vy, 0));
+    if (y >= FLOOR) (y = FLOOR), (vy = 0), (ground = true);
+    else ground = false;
+    if (act && (act.t += DT) >= (act.type === "basic" ? BASIC.dur : act.type === "tail" ? TAIL.dur : ZAP.dur)) act = null;
+    body.push({ y, air: !ground, shift, walk, free });
+  }
+  body.jumped = jumped;
+  return body;
+}
+// how long op would have to spare at their best chance to meet a shot on this path that we hit `lead` frames from now
+// (< 0: they can't): the time until the shuttle gets there, less the run (or Quick Attack) to where their swing reaches
+// it, the jump a high one needs (once they are back on the floor), and any stun they are still in
+function lookSpare(op, path, lead) {
+  const face = returnFace(op), dash = op.cd.quick <= lead * DT + 0.2, dashLen = QUICK.speed * QUICK.dur;
+  const stun = Math.max(0, op.stun - lead * DT) + (op.knocked ? STUN.tail : 0), apex = JUMP_V ** 2 / (2 * GRAV);
+  let land = 0;
+  if (!op.ground) for (let y = op.y, vy = op.vy; y < FLOOR; land += DT) (vy += GRAV * DT), (y += vy * DT);
+  let best = -Infinity;
+  path.forEach((s, j) => {
+    if (!inCourtOf(op, s.x)) return;
+    const rise = FLOOR - 18 - BASIC.reachS + 2 - s.y; // how far their feet must leave the floor for the swing to reach it
+    if (rise >= apex) return;
+    const d = Math.max(0, Math.abs(clamp(s.x - face * 12, 12, W - 12) - op.x) - BASIC.reachS + 2), run = d / RUN;
+    const move = dash ? Math.min(run, d <= dashLen ? d / QUICK.speed : QUICK.dur + (d - dashLen) / RUN) : run;
+    const jump = rise <= 0 ? 0 : Math.max(0, land - lead * DT) + (JUMP_V - Math.sqrt(JUMP_V ** 2 - 2 * GRAV * rise)) / GRAV;
+    best = Math.max(best, (j + 1) * DT - Math.max(move, jump) - stun);
+  });
+  return best;
+}
+// noise for one shot (the frame it's hit on and how): the same all the while the shuttle comes, new for the next
+const lookNoise = (seed, frame, kind) => {
+  let h = Math.imul(seed ^ Math.imul(frame, 0x9e3779b1) ^ Math.imul(kind + 1, 0x85ebca6b), 0xc2b2ae35);
+  h = Math.imul(h ^ (h >>> 15), 0x27d4eb2f);
+  return (((h ^ (h >>> 13)) >>> 0) / 2 ** 32) * LOOK.vary;
+};
+// would a bolt already on its way hit us before the swing does, walking from base to x and swinging from frame press?
+function lookZapped(me, body, base, x, press, rate, hit) {
+  for (let f = 1; f <= hit; f++) {
+    if (me.iframes > f * DT) continue;
+    const b = body[f], px = f < press ? me.x + b.shift + clamp(x - base, -b.walk, b.walk) : x + rate * (f - press + 1);
+    for (const z of bolts) if (z.owner !== me && z.life > f * DT && circleBox(z.x + z.vx * DT * f, z.y, 5, hurtbox({ x: px, y: b.y }))) return true;
+  }
+  return false;
+}
+// the best way to meet a shuttle coming along `path` (see above), or null when no shot we can get to lands in:
+// { dash, jump, press, x, key }: Quick Attack this way now, or jump on this frame; start the swing on frame `press`
+// (1: now), having walked to x, with `key`'s direction held
+function lookPlan(me, op, path, seed) {
+  const face = returnFace(me), lo = me === P1 ? 12 : NET_X + 4, hi = me === P1 ? NET_X - 4 : W - 12, frame = Math.round(game.time / DT);
+  const n = Math.min(LOOK.frames, path.length + 1), reach = BASIC.reachS - 0.4, step = RUN * DT;
+  const at = (f) => (f >= 2 ? path[f - 2] : S); // where a swing meets the shuttle on frame f (players move before it)
+  const modes = [{}];
+  if (me.quickT <= 0) for (let j = 1; j < LOOK.jumpUntil; j += 3) modes.push({ jump: j });
+  if (me.cd.quick <= 0 && me.quickT <= 0) for (const d of LOOK_DASHES) if (!(me.ground && d[1] > 0)) modes.push({ dash: d });
+  const spares = new Map();
+  let best = null;
+  for (const mode of modes) {
+    const body = lookBody(me, mode, n);
+    if (mode.jump && !body.jumped) continue;
+    for (let press = 1; press < n - 1; press += press < 12 ? 1 : 2) {
+      if (!body[press].free || mode.jump > press) continue;
+      // (only spots on our own side: a dash that carries us over the net is no use)
+      const base = me.x + body[press - 1].shift, walk = body[press - 1].walk;
+      const minX = Math.max(lo, base - walk), maxX = Math.min(hi, base + walk);
+      if (minX > maxX) continue;
+      for (const key of LOOK_KEYS) {
+        const rate = (key === "fwd" ? face : key === "back" ? -face : 0) * RUN * 0.55 * DT;
+        for (let c = press + 1; c <= Math.min(press + 8, n - 1); c++) {
+          const s = at(c);
+          if (s.land) break;
+          const dy = s.y - (body[c].y - 18), r2 = reach * reach - dy * dy;
+          if (r2 <= 0) continue;
+          const r = Math.sqrt(r2), mid = s.x - face * 12 - rate * (c - press + 1);
+          if (mid + r < minX || mid - r > maxX) continue;
+          for (const aim of [mid, mid - r * 0.6, mid + r * 0.6]) {
+            const x = clamp(base + Math.round((clamp(aim, minX, maxX) - base) / step) * step, minX, maxX);
+            // the swing meets it on the first frame it is in reach
+            let hit = 0, margin = 0;
+            for (let f = press + 1; f <= c && !hit; f++) {
+              const q = at(f), g = dhypot(q.x - (clamp(x + rate * (f - press + 1), 12, W - 12) + face * 12), q.y - (body[f].y - 18));
+              if (g < reach) (hit = f), (margin = reach - g);
+            }
+            if (!hit || hit * DT < me.noHit) continue;
+            const air = body[hit].air, k = hit * 5 + (air ? 4 : LOOK_KEYS.indexOf(key));
+            let spare = spares.get(k);
+            if (spare === undefined) {
+              const q = at(hit), shot = predictShuttle(3, { x: q.x, y: q.y, ...shotVel(face, q.x, q.y, air ? "tail" : "basic", air ? "" : key) });
+              spares.set(k, (spare = landsIn(shot, op) ? lookSpare(op, shot, hit) : null));
+            }
+            if (spare === null) continue;
+            // a little of this shot's own noise (see lookStep), so that the same rally doesn't go round and round
+            const score = spare + hit * 0.002 - Math.min(margin, 6) * 0.01 + (mode.dash ? 0.03 : mode.jump ? 0.01 : 0) + lookNoise(seed, frame + hit, k % 5);
+            if (best && score >= best.score) continue;
+            if (bolts.length && lookZapped(me, body, base, x, press, rate, hit)) continue;
+            best = { score, spare, dash: mode.dash, jump: mode.jump, press, x, key, hit };
+          }
+        }
+      }
+    }
+  }
+  return best;
+}
+function lookStep(me, op, ai, hold, press) {
+  const face = returnFace(me), fwd = face > 0 ? "right" : "left", back = face > 0 ? "left" : "right";
+  const keysFor = (dir) => ({ "": [], fwd: [fwd], back: [back], down: ["down"] })[dir];
+  const spot = (d) => NET_X - face * d; // d px from the net on our side
+  const walkTo = (x) => Math.abs(x - me.x) > (RUN * DT) / 2 && (hold(x > me.x ? "right" : "left"), true);
+  // a swing is on: keep its shot's direction held until it hits
+  if (me.act?.type === "basic" && !me.act.hitS) return void ai.shotKeys.forEach(hold);
+  if (game.state === "serve") {
+    ai.lastBy = null;
+    if (game.server !== me) return void walkTo(spot(LOOK.receiveAt));
+    if (me.act || walkTo(spot(LOOK.serveAt))) return;
+    // the serve leaving them the least time (the swing meets it next frame, where it follows us to this frame)
+    const s = { x: me.x + me.face * 12, y: me.y - 30 + dsin(game.time * 4) * 1.5 };
+    let best = null;
+    for (const dir of LOOK_KEYS) {
+      const shot = predictShuttle(3, { ...s, ...shotVel(me.face, s.x, s.y, "basic", dir) });
+      const spare = landsIn(shot, op) ? lookSpare(op, shot, 2) : Infinity;
+      if (!best || spare < best.spare) best = { dir, spare };
+    }
+    ai.shotKeys = keysFor(best.dir);
+    ai.shotKeys.forEach(hold);
+    return void press("basic");
+  }
+  if (game.state !== "rally" || S.state !== "fly") return;
+  // each shot of theirs gets its own noise for ours (Math.random, so a seeded game plays out the same)
+  if (S.last !== ai.lastBy) (ai.lastBy = S.last), (ai.lookSeed = (Math.random() * 2 ** 32) >>> 0);
+  const path = predictShuttle(3), end = path.at(-1);
+  const coming = S.last !== me && end.land && end.x >= COURT_L && end.x <= COURT_R && inCourtOf(me, end.x);
+  const plan = coming ? lookPlan(me, op, path, ai.lookSeed) : null;
+  if (plan?.dash) {
+    const [nx, ny] = plan.dash;
+    if (nx) hold(nx > 0 ? "right" : "left");
+    if (ny) hold(ny < 0 ? "up" : "down");
+    return void press("quick");
+  }
+  if (plan) {
+    if (plan.jump === 1) press("up");
+    if (plan.press > 1) return void walkTo(plan.x);
+    ai.shotKeys = keysFor(plan.key);
+    ai.shotKeys.forEach(hold);
+    return void press("basic");
+  }
+  if (coming) {
+    // nothing we can get to lands in: get under it anyway
+    const x = clamp(end.x - face * 12, 12, W - 12);
+    walkTo(x);
+    if (Math.abs(x - me.x) > 60 && me.cd.quick <= 0 && me.quickT <= 0) press("quick");
+    return;
+  }
+  // our shot is out (or theirs is going out): wait, nearer the net when they will meet it near the net
+  const meet = S.last === me && path.find((s) => inCourtOf(op, s.x) && s.vy > 0 && s.y > FLOOR - 70);
+  walkTo(spot(meet && Math.abs(meet.x - NET_X) < 48 ? LOOK.waitNear : LOOK.wait));
+  // a bolt about to hit us: hop over it
+  if (me.ground && me.iframes <= 0.2)
+    for (const b of bolts) if (b.owner !== me && (me.x - b.x) * Math.sign(b.vx) > 0 && (Math.abs(me.x - b.x) - 16) / ZAP.speed < 0.2) press("up");
+}
+
 function aiStep(me) {
   const ai = brainOf(me), op = other(me), L = AI_LEVELS[ai.level], k = me.ctl, now = game.time;
   const held = ai.src.held, press = (a) => ai.src.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
@@ -878,6 +1076,8 @@ function aiStep(me) {
   if (!gloating(me)) ai.taunt = null;
   else return void (me.stun <= 0 && !me.knocked && !game.paused && tauntStep(me, op, now, hold, press));
   if (game.state === "title" || game.state === "over" || game.paused || me.stun > 0 || me.knocked) return;
+  // AI: Claude Opus 5.5
+  if (L.lookahead) return void lookStep(me, op, ai, hold, press);
   const fwd = me.face > 0 ? "right" : "left", back = me.face > 0 ? "left" : "right";
   const keysFor = (dir) => ({ "": [], fwd: [fwd], back: [back], down: ["down"] })[dir];
   const home = me === P2 ? 290 : 94;
@@ -1040,7 +1240,7 @@ function simStep(dt) {
     if (w.score >= WIN) {
       game.state = "over";
       game.winner = w;
-      say(`${w.id}P WINS!`, w.tag, 1e9, 70);
+      say(`${p1Brain ? tagOf(w) : `${w.id}P`} WINS!`, w.tag, 1e9, 70);
     } else resetRally(w);
   }
   return true;
@@ -1248,7 +1448,8 @@ function drawOverlay(P) {
     P.glow(W / 2, 70, 90, VOLT[4], 0.15);
     if (Math.floor(game.time * 2) % 2) P.text("PRESS ENTER", W / 2, 128, C("#fff3a0"), { font: "big", align: "center", outline: INK });
     P.text(`FIRST TO ${WIN}`, W / 2, 144, C("#9a96b0"), { align: "center", outline: INK });
-    if (ai.on) P.text(`${AI_LEVELS[ai.level].unlimited ? "AI UNLIMITED - VS" : "VS CPU -"} ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
+    if (p1Brain) P.text(`AI VS AI - ${tagOf(P1)} VS ${tagOf(P2)}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
+    else if (ai.on) P.text(`${AI_LEVELS[ai.level].unlimited ? "AI UNLIMITED - VS" : "VS CPU -"} ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
     if (net.mode !== "local") P.text(`ONLINE - YOU ARE ${myId()}P`, W / 2, 168, C("#ffffff"), { align: "center", outline: INK });
   } else if (game.state === "over") {
     P.rect(W / 2 - 90, 58, 180, 70, INK);
@@ -2010,6 +2211,8 @@ const ui = (() => {
 
 // ---- choosing the opponent: the AI at one of five levels, an AI from the AI Unlimited list, or two people on one
 // device. The AI Unlimited button opens the list and picks its last choice (the first AI to begin with).
+// AI vs AI opens the same list to pick two AIs to watch (setArena): the AI picked first plays 1P, the next 2P, then
+// 1P again, and so on. It starts with the last pair (ranks 1 and 2 to begin with), so Enter always starts a game.
 (() => {
   const list = document.getElementById("unlimited-list"), panel = document.getElementById("unlimited");
   // newest first: each AI joined by beating every one before it, so the newest is ranked 1 (gold, then silver, bronze)
@@ -2024,23 +2227,34 @@ const ui = (() => {
       medal.setAttribute("aria-label", `${i + 1}위`);
       who.className = "who";
       who.append(Object.assign(document.createElement("strong"), { textContent: u.ko }), Object.assign(document.createElement("span"), { className: "by", textContent: `by ${u.by}` }));
-      b.append(medal, who);
+      b.append(medal, who, Object.assign(document.createElement("span"), { className: "side", hidden: true }));
       list.append(b);
     });
   }
   const rankOf = (level) => ranked.findIndex((u) => `unlimited:${u.id}` === level) + 1;
   const buttons = [...document.querySelectorAll("[data-ai]")], status = document.getElementById("mode-status");
   if (!buttons.length) return;
-  const openUnlimited = document.querySelector("[data-unlimited]");
+  const openUnlimited = document.querySelector("[data-unlimited]"), openArena = document.querySelector("[data-arena]");
   let lastUnlimited = `unlimited:${ranked[0].id}`;
+  // AI vs AI: the two AIs (1P, 2P), and the side the next pick goes to
+  const pair = [`unlimited:${ranked[0].id}`, `unlimited:${(ranked[1] ?? ranked[0]).id}`];
+  let nextSide = 1;
+  const watching = () => net.mode === "local" && !!p1Brain;
   const show = () => {
-    const level = net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null, L = AI_LEVELS[level];
-    for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
+    const arena = watching();
+    const level = arena ? null : net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null, L = AI_LEVELS[level];
+    for (const b of buttons) {
+      const sides = arena ? [1, 2].filter((i) => pair[i - 1] === b.dataset.ai) : [], badge = b.querySelector(".side");
+      b.setAttribute("aria-pressed", String(arena ? sides.length > 0 : b.dataset.ai === level));
+      if (badge) (badge.hidden = !sides.length), (badge.textContent = sides.map((i) => `${i}P`).join(" "));
+    }
     if (openUnlimited) openUnlimited.setAttribute("aria-pressed", String(!!L?.unlimited));
-    if (panel) panel.hidden = !L?.unlimited;
-    const start = `나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`;
+    if (openArena) openArena.setAttribute("aria-pressed", String(arena));
+    if (panel) panel.hidden = !(L?.unlimited || arena);
+    const go = `${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`, start = `나는 1P예요. ${go}`;
     status.textContent =
       net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
+      : arena ? `AI vs AI: 1P ${AI_LEVELS[pair[0]].ko} vs 2P ${AI_LEVELS[pair[1]].ko}. 아래 목록에서 다음에 고르는 AI가 ${nextSide}P가 돼요. 조작 없이 구경만 해요. ${go}`
       : L?.unlimited ? `AI Unlimited ${rankOf(level)}위 ${L.ko}(by ${L.by})와 대전해요. ${start}`
       : ai.on ? `AI(${L.ko})와 대전해요. ${start}`
       : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
@@ -2053,8 +2267,24 @@ const ui = (() => {
     show();
     b.blur(); // so Enter/Space go to the game, not back to this button
   };
-  for (const b of buttons) b.onclick = () => pick(b, b.dataset.ai || null);
+  // a new AI vs AI match between the pair, on the title screen
+  const watch = (b) => {
+    if (net.peer) leave(true);
+    setArena(pair[0], pair[1], (Math.random() * 2 ** 32) >>> 0);
+    show();
+    b.blur();
+  };
+  for (const b of buttons) {
+    b.onclick = () => {
+      const level = b.dataset.ai || null;
+      if (!(watching() && AI_LEVELS[level]?.unlimited)) return pick(b, level);
+      pair[nextSide - 1] = level;
+      nextSide = 3 - nextSide;
+      watch(b);
+    };
+  }
   if (openUnlimited) openUnlimited.onclick = () => pick(openUnlimited, lastUnlimited);
+  if (openArena) openArena.onclick = () => ((nextSide = 1), watch(openArena));
   // a phone has one player: start against the AI
   if (TOUCH) setAI("normal");
   show();
@@ -2125,4 +2355,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, tagOf, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
