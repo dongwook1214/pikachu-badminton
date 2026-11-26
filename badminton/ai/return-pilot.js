@@ -1,24 +1,20 @@
-// Side-normalized controller for Return Blend. Reads court state and emits ordinary game inputs.
+// Side-normalized planner for Return Blend. It evaluates paths without stepping the game.
 
 import { openingStyle, rallyBreakStyle } from "./return-styles.js";
 
+export const [L, R, U, D, F, H] = ["back", "forward", "up", "down", "basic", "quick"];
+
 export function makePilot(
   w,
-  sendEvent,
   {
-    zapLead = null,
     guardX = 110,
     receiveX = 105,
     serveX = 134,
     smashBonus = 2,
     serveDrop = 0,
     serveLob = 0,
-    zapDistance = 25,
-    chooseAction = null,
     contactTempo = 0.29,
     airBias = 0,
-    rallyMix = 0,
-    mixSeed = 1,
     breakAfter = 0,
     breakPattern = 0,
     serveMode = 0,
@@ -31,12 +27,6 @@ export function makePilot(
 ) {
   const { game: g, P1: p, P2: o, S: s, bolts } = w,
     dt = 1 / 60;
-  const L = "KeyA",
-    R = "KeyD",
-    U = "KeyW",
-    D = "KeyS",
-    F = "KeyF",
-    H = "KeyH";
   const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
   const dir = (x, t = 1) => (x > t ? R : x < -t ? L : "");
   const xsign = (k) => (k === R ? 1 : k === L ? -1 : 0);
@@ -119,39 +109,17 @@ export function makePilot(
     if (air) val += smashBonus + airBias;
     return val;
   }
-  let exchange = 0,
-    airVariation = 0,
-    paceVariation = 0,
-    shotVariation = [0, 0, 0, 0],
-    breakReturns = 0,
+  let breakReturns = 0,
     tactic = null;
   let openingObserved = false,
     openingReturns = 0,
     serveSince = null;
-  let sent = new Set(),
-    last = -1,
-    lastOwner = null,
-    plan = null,
-    attackHold = "",
-    n = 0,
-    lastPlan = -999,
-    nextZapCheck = 0,
-    nextShotCheck = 0,
-    groundUntil = -1,
-    guardUntil = -1,
-    guardMove = "";
+  let output, lastOwner = null, plan = null, attackHold = "", n = 0, lastPlan = -999;
   function send(held = [], pulses = []) {
     if (p.x >= 187.5 && pulses.includes(H) && held.includes(R))
       pulses = pulses.filter((k) => k !== H);
     if (p.x >= OWN_LIMIT) held = held.filter((k) => k !== R);
-    const h = new Set(clean(held));
-    for (const a of sent) if (!h.has(a)) sendEvent("keyup", a);
-    for (const a of h) if (!sent.has(a)) sendEvent("keydown", a);
-    sent = h;
-    for (const a of clean(pulses)) {
-      sendEvent("keydown", a);
-      if (!h.has(a)) sendEvent("keyup", a);
-    }
+    output = { held: clean(held), pressed: clean(pulses) };
   }
   function bulletAt(x, y, j) {
     if (p.iframes > j * dt + 0.04) return false;
@@ -232,7 +200,7 @@ export function makePilot(
       fight = Math.max(0, (o.x - 202) * 0.03);
     if (max < 3) return null;
     const modes = [{ jump: 0 }];
-    if (p.ground && g.time >= groundUntil) {
+    if (p.ground) {
       for (let i = 1; i < Math.min(42, max); i += 4) modes.push({ jump: i });
     } else if (p.vy > 0) {
       let yi = p.y,
@@ -245,7 +213,7 @@ export function makePilot(
       }
       if (j + 5 < max) modes.push({ jump: j + 1 }, { jump: j + 5 }, { jump: j + 10 });
     }
-    if (p.cd.quick <= dt && p.quickT <= 0 && g.time >= groundUntil) {
+    if (p.cd.quick <= dt && p.quickT <= 0) {
       for (const d of dashDirections) {
         if (p.ground && d[1] > 0) continue;
         modes.push({ dash: d });
@@ -356,11 +324,10 @@ export function makePilot(
                 if (!avoid) continue;
                 val +=
                   Math.min(15, margin) * 0.43 -
-                  idx * (contactTempo + paceVariation + (intent?.pace ?? 0)) +
+                  idx * (contactTempo + (intent?.pace ?? 0)) +
                   (air
-                    ? airVariation + (intent?.air ?? 0)
-                    : shotVariation[key === L ? 1 : key === R ? 2 : key === D ? 3 : 0] +
-                      (intent?.ground[key === L ? 1 : key === R ? 2 : key === D ? 3 : 0] ?? 0)) -
+                    ? (intent?.air ?? 0)
+                    : (intent?.ground[key === L ? 1 : key === R ? 2 : key === D ? 3 : 0] ?? 0)) -
                   (mode.dash ? 2.4 : 0) -
                   (mode.jump ? 1.5 : 0) -
                   Math.abs(tx - p.x) * 0.025 +
@@ -388,49 +355,9 @@ export function makePilot(
     return false;
   }
   // Recover to midcourt, shading forward for short balls. Jump over incoming zaps.
-  // Pressure only after a legal outgoing shot. Leave enough time for our own hit lockout.
-  function canPressureWithZap(f) {
-    if (s.last !== p || p.act || !p.ground || p.cd.zap > dt || p.face !== 1) return false;
-    if (!o.ground || o.knocked || o.stun > 0 || o.iframes > 0.1 || o.x - p.x < zapDistance)
-      return false;
-    const end = f.at(-1);
-    if (end.y < 196 || end.x <= 192 || end.x > 368) return false;
-    const meet = f.findIndex((v) => v.x > 192 && v.y > 156 && v.y < 196 && v.vy > 0);
-    if (meet < 0) return false;
-    const boltTravel = 0.07 + Math.max(0, o.x - p.x - 24) / 250;
-    const lead = meet * dt - boltTravel;
-    return (
-      meet * dt >= 0.34 &&
-      (chooseAction
-        ? lead >= -0.12 && lead <= 0.5
-        : lead >= zapLead - 0.18 && lead <= zapLead + 0.1)
-    );
-  }
-
-  // A forecast can replace the first legal tactical choice.
-  const shotAction = (key) => ({
-    id: key === D ? "drop" : key === L ? "lob" : key === R ? "drive" : "clear",
-    held: [key].filter(Boolean),
-    pulses: [F],
-    swing: key,
-  });
-  function attack(key, allowOptions) {
-    let first = shotAction(key);
-    if (chooseAction && allowOptions && g.time >= nextShotCheck) {
-      const options = [first, ...["", L, R, D].filter((k) => k !== key).map(shotAction)];
-      first = chooseAction("shot", options) ?? first;
-      nextShotCheck = g.time + 0.22;
-    }
-    attackHold = first.swing;
-    send(first.held, first.pulses);
-  }
-  function continueAfter(action) {
-    if (action.swing !== undefined) attackHold = action.swing;
-    if (action.holdGuard) {
-      guardUntil = g.time + action.holdGuard * dt;
-      guardMove = action.held[0] ?? "";
-    }
-    send(action.held, action.pulses);
+  function attack(key) {
+    attackHold = key;
+    send([key], [F]);
   }
   function guard(f) {
     if (p.quickT > 0) {
@@ -452,43 +379,12 @@ export function makePilot(
     const move = dir((opener ? clamp(target + opener.guard, 68, 168) : target) - p.x, 2);
     if (dodge(move)) {
       send([move], [U]);
-    } else if (s.last === p && g.time < guardUntil) {
-      send([guardMove]);
-    } else if (
-      s.last === p &&
-      p.ground &&
-      !p.act &&
-      end.x > 194 &&
-      end.x <= 367 &&
-      chooseAction?.canProbe?.("escape")
-    ) {
-      const options = [
-        { id: "recover", held: [move].filter(Boolean), pulses: [] },
-        { id: "step-in", held: [R], pulses: [], holdGuard: 12 },
-        { id: "step-back", held: [L], pulses: [], holdGuard: 12 },
-      ];
-      continueAfter(chooseAction("escape", options) ?? options[0]);
-    } else if (chooseAction && g.time >= nextZapCheck && canPressureWithZap(f)) {
-      const options = [
-        { id: "recover", held: [move].filter(Boolean), pulses: [] },
-        { id: "zap", held: [move].filter(Boolean), pulses: ["KeyG"] },
-      ];
-      nextZapCheck = g.time + 0.24;
-      continueAfter(chooseAction("pressure", options) ?? options[0]);
-    } else if (!chooseAction && zapLead !== null && canPressureWithZap(f)) {
-      send([move], ["KeyG"]);
     } else {
       send([move]);
     }
   }
   function tick() {
-    if (g.time === last || g.freeze > 0) return;
-    last = g.time;
     n++;
-    if (g.state === "over") {
-      send([]);
-      return;
-    }
     if (g.state !== "serve") serveSince = null;
     if (s.last !== lastOwner) {
       plan = null;
@@ -505,28 +401,20 @@ export function makePilot(
           stallCycle,
         );
       }
-      if (rallyMix && s.last === o && ++exchange >= 4) {
-        let seed =
-          Math.imul(exchange + Math.round(g.time * 60), 16807) ^ Math.imul(mixSeed, 52142347);
-        const unit = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 2 ** 31 - 1;
-        airVariation = rallyMix * unit();
-        paceVariation = rallyMix * 0.014 * unit();
-        shotVariation = [0, 1, 2, 3].map(() => rallyMix * 0.55 * unit());
-      }
+
     }
     if (p.stun > 0 || p.knocked || g.paused) {
       plan = null;
       send([]);
       return;
     }
-    if (g.state === "point" || g.state === "title") {
+    if (g.state === "point") {
       plan = null;
       send([]);
       return;
     }
     if (g.state === "serve") {
       plan = null;
-      guardUntil = -1;
       if (openingMode) {
         openingObserved = true;
         openingReturns = 0;
@@ -534,11 +422,6 @@ export function makePilot(
       serveSince ??= g.time;
       breakReturns = 0;
       tactic = null;
-      if (rallyMix && exchange) {
-        exchange = 0;
-        airVariation = paceVariation = 0;
-        shotVariation.fill(0);
-      }
       if (g.server === p) {
         if (p.act) {
           send([attackHold]);
@@ -571,7 +454,7 @@ export function makePilot(
             selected = k;
           }
         }
-        attack(selected, true);
+        attack(selected);
       } else {
         const move = dir(receiveX - p.x, 2);
         send([move]);
@@ -609,7 +492,6 @@ export function makePilot(
       return;
     }
     const jumpAge = plan && n - plan.at;
-    if (plan && g.time < groundUntil && (plan.mode.jump || plan.mode.dash)) plan = null;
     if (!plan || n - lastPlan >= (plan.start < 10 ? 2 : 4) || jumpAge >= plan.start - 1) {
       plan = choose(f);
       if (plan) plan.at = n;
@@ -621,25 +503,7 @@ export function makePilot(
         wantDash = plan.mode.dash && age === 0,
         wantJump = plan.mode.jump === age + 1;
       if (plan.start <= age + 1 && !p.act) {
-        attack(plan.key, p.ground);
-        plan = null;
-        return;
-      }
-      if (chooseAction && (wantJump || wantDash) && g.time >= nextShotCheck) {
-        const [dx, dy] = plan.mode.dash ?? [0, 0];
-        const direction = dx ? dir(dx, 0) : "";
-        const leap = wantDash
-          ? {
-              id: "dash",
-              held: [direction, dy < 0 ? U : dy > 0 ? D : ""].filter(Boolean),
-              pulses: [H],
-            }
-          : { id: "jump", held: [mv].filter(Boolean), pulses: [U] };
-        const grounded = { id: "ground", held: [mv].filter(Boolean), pulses: [], stayGround: 26 };
-        const action = chooseAction("approach", [leap, grounded]) ?? leap;
-        nextShotCheck = g.time + 0.32;
-        if (action.stayGround) groundUntil = g.time + action.stayGround / 60;
-        continueAfter(action);
+        attack(plan.key);
         plan = null;
         return;
       }
@@ -673,7 +537,7 @@ export function makePilot(
           val = v;
         }
       }
-      attack(selected, p.ground);
+      attack(selected);
       return;
     }
     if (
@@ -688,12 +552,9 @@ export function makePilot(
     }
     send([mv]);
   }
-  return {
-    tick,
-    prime(action) {
-      last = g.time;
-      if (action.stayGround) groundUntil = g.time + action.stayGround / 60;
-      continueAfter(action);
-    },
+  return () => {
+    output = { held: [], pressed: [] };
+    tick();
+    return output;
   };
 }

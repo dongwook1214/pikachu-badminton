@@ -1,18 +1,10 @@
-import { makePilot } from "./return-pilot.js";
+import { makePilot, L, R, U, D, F, H } from "./return-pilot.js";
 
-const keyMirror = {
-  KeyA: "ArrowRight",
-  KeyD: "ArrowLeft",
-  KeyW: "ArrowUp",
-  KeyS: "ArrowDown",
-  KeyF: "KeyK",
-  KeyH: "Semicolon",
-  KeyG: "KeyL",
-};
+const actions = { [L]: "left", [R]: "right", [U]: "up", [D]: "down", [F]: "basic", [H]: "quick" };
 const WIDTH = 384;
 
-export function courtPilot(engine, side, config, chooseAction = null, inputs = null) {
-  const { game, P1, P2, S, bolts, keyDown, keyUp } = engine;
+export function courtPilot(engine, side, config) {
+  const { game, P1, P2, S, bolts } = engine;
   const flip = side === 2;
   const viewPlayer = (p) =>
     Object.freeze({
@@ -75,9 +67,6 @@ export function courtPilot(engine, side, config, chooseAction = null, inputs = n
       get state() {
         return game.state;
       },
-      get freeze() {
-        return game.freeze;
-      },
       get paused() {
         return game.paused;
       },
@@ -108,37 +97,22 @@ export function courtPilot(engine, side, config, chooseAction = null, inputs = n
     // Keep the same collection identity because the pilot captures it once.
     bolts: [],
   };
-  const pilot = makePilot(
-    observations,
-    (type, key) => {
-      if (!Object.hasOwn(keyMirror, key)) throw new Error(`Unsupported pilot key: ${key}`);
-      const physical = flip ? keyMirror[key] : key;
-      if (inputs) {
-        if (type === "keydown") { inputs.held.add(physical); inputs.pressed.add(physical); }
-        else inputs.held.delete(physical);
-      } else if (type === "keydown") keyDown(physical);
-      else keyUp(physical);
-    },
-    {
-      ...config,
-      ...(chooseAction ? { smashBonus: 0, serveLob: 0, serveDrop: 0, chooseAction } : {}),
-    },
-  );
-  return {
-    prime: pilot.prime,
-    tick() {
-      observations.bolts.length = 0;
-      for (const b of bolts)
-        observations.bolts.push(
-          Object.freeze({
-            owner: ref(b.owner),
-            x: flip ? WIDTH - b.x : b.x,
-            y: b.y,
-            vx: flip ? -b.vx : b.vx,
-            life: b.life,
-          }),
-        );
-      pilot.tick();
-    },
+  const pilot = makePilot(observations, config);
+  const action = (key) => key === L && flip ? "right" : key === R && flip ? "left" : actions[key];
+  return (hold, press) => {
+    observations.bolts.length = 0;
+    for (const b of bolts)
+      observations.bolts.push(
+        Object.freeze({
+          owner: ref(b.owner),
+          x: flip ? WIDTH - b.x : b.x,
+          y: b.y,
+          vx: flip ? -b.vx : b.vx,
+          life: b.life,
+        }),
+      );
+    const { held, pressed } = pilot();
+    for (const key of held) hold(action(key));
+    for (const key of pressed) press(action(key));
   };
 }
