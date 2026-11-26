@@ -623,7 +623,8 @@ const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, er
 const ai = { on: false, level: "normal", src: AI_SRC, ...newMemory() };
 let p1Brain = null;
 const brainOf = (p) => (p === P2 ? (ai.on ? ai : null) : p1Brain);
-const tagOf = (p) => (brainOf(p) ? "CPU" : `${p.id}P`);
+// in AI vs AI (both sides AI) each player goes by its AI's name
+const tagOf = (p) => (brainOf(p) ? (p1Brain ? AI_LEVELS[brainOf(p).level].name : "CPU") : `${p.id}P`);
 const rand = (a, b) => a + Math.random() * (b - a);
 
 function setAI(level) {
@@ -1222,7 +1223,7 @@ function simStep(dt) {
     if (w.score >= WIN) {
       game.state = "over";
       game.winner = w;
-      say(`${w.id}P WINS!`, w.tag, 1e9, 70);
+      say(`${p1Brain ? tagOf(w) : `${w.id}P`} WINS!`, w.tag, 1e9, 70);
     } else resetRally(w);
   }
   return true;
@@ -1430,7 +1431,8 @@ function drawOverlay(P) {
     P.glow(W / 2, 70, 90, VOLT[4], 0.15);
     if (Math.floor(game.time * 2) % 2) P.text("PRESS ENTER", W / 2, 128, C("#fff3a0"), { font: "big", align: "center", outline: INK });
     P.text(`FIRST TO ${WIN}`, W / 2, 144, C("#9a96b0"), { align: "center", outline: INK });
-    if (ai.on) P.text(`${AI_LEVELS[ai.level].unlimited ? "AI UNLIMITED - VS" : "VS CPU -"} ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
+    if (p1Brain) P.text(`AI VS AI - ${tagOf(P1)} VS ${tagOf(P2)}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
+    else if (ai.on) P.text(`${AI_LEVELS[ai.level].unlimited ? "AI UNLIMITED - VS" : "VS CPU -"} ${AI_LEVELS[ai.level].name}`, W / 2, 168, C("#cfd8ea"), { align: "center", outline: INK });
     if (net.mode !== "local") P.text(`ONLINE - YOU ARE ${myId()}P`, W / 2, 168, C("#ffffff"), { align: "center", outline: INK });
   } else if (game.state === "over") {
     P.rect(W / 2 - 90, 58, 180, 70, INK);
@@ -2192,6 +2194,8 @@ const ui = (() => {
 
 // ---- choosing the opponent: the AI at one of five levels, an AI from the AI Unlimited list, or two people on one
 // device. The AI Unlimited button opens the list and picks its last choice (the first AI to begin with).
+// AI vs AI opens the same list to pick two AIs to watch (setArena): the AI picked first plays 1P, the next 2P, then
+// 1P again, and so on. It starts with the last pair (ranks 1 and 2 to begin with), so Enter always starts a game.
 (() => {
   const list = document.getElementById("unlimited-list"), panel = document.getElementById("unlimited");
   // newest first: each AI joined by beating every one before it, so the newest is ranked 1 (gold, then silver, bronze)
@@ -2206,23 +2210,34 @@ const ui = (() => {
       medal.setAttribute("aria-label", `${i + 1}위`);
       who.className = "who";
       who.append(Object.assign(document.createElement("strong"), { textContent: u.ko }), Object.assign(document.createElement("span"), { className: "by", textContent: `by ${u.by}` }));
-      b.append(medal, who);
+      b.append(medal, who, Object.assign(document.createElement("span"), { className: "side", hidden: true }));
       list.append(b);
     });
   }
   const rankOf = (level) => ranked.findIndex((u) => `unlimited:${u.id}` === level) + 1;
   const buttons = [...document.querySelectorAll("[data-ai]")], status = document.getElementById("mode-status");
   if (!buttons.length) return;
-  const openUnlimited = document.querySelector("[data-unlimited]");
+  const openUnlimited = document.querySelector("[data-unlimited]"), openArena = document.querySelector("[data-arena]");
   let lastUnlimited = `unlimited:${ranked[0].id}`;
+  // AI vs AI: the two AIs (1P, 2P), and the side the next pick goes to
+  const pair = [`unlimited:${ranked[0].id}`, `unlimited:${(ranked[1] ?? ranked[0]).id}`];
+  let nextSide = 1;
+  const watching = () => net.mode === "local" && !!p1Brain;
   const show = () => {
-    const level = net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null, L = AI_LEVELS[level];
-    for (const b of buttons) b.setAttribute("aria-pressed", String(b.dataset.ai === level));
+    const arena = watching();
+    const level = arena ? null : net.mode === "local" && ai.on ? ai.level : net.mode === "local" ? "" : null, L = AI_LEVELS[level];
+    for (const b of buttons) {
+      const sides = arena ? [1, 2].filter((i) => pair[i - 1] === b.dataset.ai) : [], badge = b.querySelector(".side");
+      b.setAttribute("aria-pressed", String(arena ? sides.length > 0 : b.dataset.ai === level));
+      if (badge) (badge.hidden = !sides.length), (badge.textContent = sides.map((i) => `${i}P`).join(" "));
+    }
     if (openUnlimited) openUnlimited.setAttribute("aria-pressed", String(!!L?.unlimited));
-    if (panel) panel.hidden = !L?.unlimited;
-    const start = `나는 1P예요. ${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`;
+    if (openArena) openArena.setAttribute("aria-pressed", String(arena));
+    if (panel) panel.hidden = !(L?.unlimited || arena);
+    const go = `${TOUCH ? "START나 화면을 누르면" : "Enter를 누르면"} 시작해요.`, start = `나는 1P예요. ${go}`;
     status.textContent =
       net.mode !== "local" ? "온라인 대전 중에는 고를 수 없어요."
+      : arena ? `AI vs AI: 1P ${AI_LEVELS[pair[0]].ko} vs 2P ${AI_LEVELS[pair[1]].ko}. 아래 목록에서 다음에 고르는 AI가 ${nextSide}P가 돼요. 조작 없이 구경만 해요. ${go}`
       : L?.unlimited ? `AI Unlimited ${rankOf(level)}위 ${L.ko}(by ${L.by})와 대전해요. ${start}`
       : ai.on ? `AI(${L.ko})와 대전해요. ${start}`
       : "한 기기로 둘이서 해요. 1P와 2P 조작은 아래 표를 보세요.";
@@ -2235,8 +2250,24 @@ const ui = (() => {
     show();
     b.blur(); // so Enter/Space go to the game, not back to this button
   };
-  for (const b of buttons) b.onclick = () => pick(b, b.dataset.ai || null);
+  // a new AI vs AI match between the pair, on the title screen
+  const watch = (b) => {
+    if (net.peer) leave(true);
+    setArena(pair[0], pair[1], (Math.random() * 2 ** 32) >>> 0);
+    show();
+    b.blur();
+  };
+  for (const b of buttons) {
+    b.onclick = () => {
+      const level = b.dataset.ai || null;
+      if (!(watching() && AI_LEVELS[level]?.unlimited)) return pick(b, level);
+      pair[nextSide - 1] = level;
+      nextSide = 3 - nextSide;
+      watch(b);
+    };
+  }
   if (openUnlimited) openUnlimited.onclick = () => pick(openUnlimited, lastUnlimited);
+  if (openArena) openArena.onclick = () => ((nextSide = 1), watch(openArena));
   // a phone has one player: start against the AI
   if (TOUCH) setAI("normal");
   show();
@@ -2307,4 +2338,4 @@ followServer();
 requestAnimationFrame(frameLoop);
 
 // debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, tagOf, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
