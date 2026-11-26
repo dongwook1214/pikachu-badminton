@@ -1,0 +1,27 @@
+// The Return Blend controller uses base player stats.
+export const RETURN_BLEND = Object.freeze({
+  "zapLead": null,
+  "guardX": 145,
+  "receiveX": 125,
+  "serveX": 122,
+  "smashBonus": 2,
+  "serveDrop": 0,
+  "serveLob": 0,
+  "zapDistance": 25,
+  "rolloutHorizon": 108,
+  "contactTempo": 0.72,
+  "airBias": -61,
+  "rallyMix": 0,
+  "mixSeed": 543,
+  "breakAfter": 6,
+  "breakPattern": 1,
+  "rolloutPace": 0,
+  "serveMode": 2,
+  "adaptiveBreak": 2,
+  "stallSearch": 16,
+  "stallProbe": 2,
+  "stallGuard": 17,
+  "stallCycle": 4,
+  "openingMode": 3,
+  "servePatience": 22
+});

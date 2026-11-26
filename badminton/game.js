@@ -12,6 +12,12 @@ import { zigzag, crackle } from "./vendor/pixelfx/src/fx/lightning/_lib.js";
 // the game's own math goes through detmath.js so that two browsers playing online stay identical (rollback.js)
 import { dsin, dcos, datan2, dhypot } from "./detmath.js";
 import { Rollback } from "./rollback.js";
+import { makeReturnBlend } from "./ai/return-blend.js";
+
+// The forecast uses the same rules in a court that does not bind the page.
+const FORECAST = new URL(import.meta.url).searchParams.has("forecast");
+let forecastRandom = null;
+const randomUnit = () => forecastRandom ? forecastRandom() : Math.random();
 
 // ---------------------------------------------------------------- world
 const W = 384, H = 216, FLOOR = 196, NET_X = 192, NET_TOP = 160, NET_BOTTOM = 184, COURT_L = 16, COURT_R = 368;
@@ -92,13 +98,15 @@ function keyDown(code, repeat = false) {
 function keyUp(code) {
   held.delete(code);
 }
-addEventListener("keydown", (e) => {
-  if (typing(e)) return;
-  if (GAME_KEYS.has(e.code)) e.preventDefault();
-  keyDown(e.code, e.repeat);
-});
-addEventListener("keyup", (e) => keyUp(e.code));
-addEventListener("blur", () => held.clear());
+if (!FORECAST) {
+  addEventListener("keydown", (e) => {
+    if (typing(e)) return;
+    if (GAME_KEYS.has(e.code)) e.preventDefault();
+    keyDown(e.code, e.repeat);
+  });
+  addEventListener("keyup", (e) => keyUp(e.code));
+  addEventListener("blur", () => held.clear());
+}
 const pHeld = (p, codes) => codes.some((c) => p.src.held.has(c));
 const pPressed = (p, codes) => codes.some((c) => p.src.pressed.has(c));
 // menu keys (start, pause) count from either player
@@ -144,7 +152,7 @@ const S = { x: 0, y: 0, vx: 0, vy: 0, state: "serve", last: null, smash: 0, trai
 
 // rng: the game's own random numbers (who serves first, each bolt's look), kept in the state so that both
 // browsers draw the same ones online. Effects and dust are only for show and use Math.random.
-const game = { state: "title", server: P1, timer: 0, msg: null, paused: false, winner: null, pointWinner: null, time: 0, freeze: 0, shakeT: 0, shakeA: 0, rng: (Math.random() * 2 ** 32) >>> 0 };
+const game = { state: "title", server: P1, timer: 0, msg: null, paused: false, winner: null, pointWinner: null, time: 0, freeze: 0, shakeT: 0, shakeA: 0, rng: (randomUnit() * 2 ** 32) >>> 0 };
 const effects = [], bolts = [], dust = [], marks = [];
 function srand() {
   game.rng = (Math.imul(game.rng, 1664525) + 1013904223) >>> 0;
@@ -171,6 +179,14 @@ function newGame() {
   if (!fxLog.replay) effects.length = 0;
   game.winner = null;
   resetRally(srand() < 0.5 ? P1 : P2);
+  for (const p of PLAYERS) {
+    const brain = brainOf(p);
+    if (isReturnBlend(brain)) {
+      brain.controller = null;
+      brain.src.held.clear();
+      brain.src.pressed.clear();
+    }
+  }
 }
 function say(text, color = WHITE, dur = 1, y = 52) {
   game.msg = { text, color, t: 0, dur, y };
@@ -188,7 +204,7 @@ function shake(a, t) {
 const MODS = { hitSpark, critHit, bluntHit, zapHit, electrified, spinSlash, stunnedFx };
 const MOD_NAME = new Map(Object.entries(MODS).map(([k, v]) => [v, k]));
 function addFx(mod, opts, extra = {}) {
-  const e = { fx: createFx(mod, { seed: (Math.random() * 1e6) | 0, ...opts }), ...extra };
+  const e = { fx: createFx(mod, { seed: (randomUnit() * 1e6) | 0, ...opts }), ...extra };
   effects.push(e);
   return e;
 }
@@ -220,9 +236,9 @@ function puff(x, y, n, dir = 0, color = "#b8a890") {
   if (!fxOnce("puff").fresh) return;
   for (let i = 0; i < n; i++)
     dust.push({
-      x: x + (Math.random() - 0.5) * 8, y: y - Math.random() * 2,
-      vx: (dir || (Math.random() < 0.5 ? -1 : 1)) * (20 + Math.random() * 50), vy: -10 - Math.random() * 30,
-      life: 0, max: 0.25 + Math.random() * 0.25, c: C(color), r: Math.random() < 0.4 ? 1 : 0,
+      x: x + (randomUnit() - 0.5) * 8, y: y - randomUnit() * 2,
+      vx: (dir || (randomUnit() < 0.5 ? -1 : 1)) * (20 + randomUnit() * 50), vy: -10 - randomUnit() * 30,
+      life: 0, max: 0.25 + randomUnit() * 0.25, c: C(color), r: randomUnit() < 0.4 ? 1 : 0,
     });
 }
 // a replay is about to play frames from..to-1 again: anything they start is checked off as it comes round again,
@@ -372,10 +388,10 @@ const inPlay = (p) => (game.state !== "title" && game.state !== "over") || gloat
 const returnFace = (p) => p === P1 ? 1 : -1;
 function updateFacing(p) {
   if (p.act || p.quickT > 0 || p.knocked || p.stun > 0) return;
-  const dx = other(p).x - p.x;
+  const dx = other(p).x - p.x, brain = brainOf(p);
   // A CPU return aims at the opponent's scoring half, not at their avatar.
   // Crossing the net is legal and doesn't change which half belongs to whom.
-  if (brainOf(p) && game.state === "rally" && S.state === "fly" && S.last !== p) {
+  if (brain && !isReturnBlend(brain) && game.state === "rally" && S.state === "fly" && S.last !== p) {
     p.face = returnFace(p);
   } else if (Math.abs(dx) > 1) p.face = Math.sign(dx);
 }
@@ -610,6 +626,11 @@ const UNLIMITED = [
     id: "cpu", name: "CPU", ko: "cpu", by: "yhc125",
     algo: { ...AI_LEVELS.korean, pow: 1, blockSmash: true },
   },
+  // AI-assisted: OpenAI ChatGPT.
+  {
+    id: "return-blend", name: "RETURN BLEND", ko: "리턴 블렌드", by: "yhc125",
+    algo: { pow: 1, returnBlend: true },
+  },
 ];
 for (const u of UNLIMITED) AI_LEVELS[`unlimited:${u.id}`] = { ...u.algo, name: u.name, ko: u.ko, by: u.by, unlimited: true };
 // A brain: one AI player's level, its input source and what it remembers between frames. `ai` is 2P's (with `on`
@@ -618,13 +639,15 @@ const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, er
 const ai = { on: false, level: "normal", src: AI_SRC, ...newMemory() };
 let p1Brain = null;
 const brainOf = (p) => (p === P2 ? (ai.on ? ai : null) : p1Brain);
+const isReturnBlend = (brain) => !!AI_LEVELS[brain?.level]?.returnBlend;
+let forecastCourt;
 const tagOf = (p) => (brainOf(p) ? "CPU" : `${p.id}P`);
-const rand = (a, b) => a + Math.random() * (b - a);
+const rand = (a, b) => a + randomUnit() * (b - a);
 
 function setAI(level) {
   ai.on = !!level;
   if (level) ai.level = level;
-  Object.assign(ai, newMemory());
+  Object.assign(ai, newMemory(), { controller: null });
   p1Brain = null;
   P2.spr = ai.on ? SPR_CPU : SPR_P2;
   AI_SRC.held.clear();
@@ -745,7 +768,7 @@ const shotOptions = (me, op, s) =>
 function killerShot(shots) {
   if (!shots.length) return null;
   const best = Math.min(...shots.map((o) => o.spare)), near = shots.filter((o) => o.spare <= best + 0.1);
-  return near[(Math.random() * near.length) | 0].dir;
+  return near[(randomUnit() * near.length) | 0].dir;
 }
 
 // dash8: a dash, then the swing the moment it ends (in the air it's an Iron Tail), that meets the shuttle. For each of
@@ -817,7 +840,7 @@ const TAUNTS = [["rush", 2.6], ["squats", 1.6], ["wiggle", 1.6]];
 function tauntStep(me, op, now, hold, press) {
   const ai = brainOf(me);
   if (!ai.taunt) {
-    const i = (Math.random() * TAUNTS.length) | 0;
+    const i = (randomUnit() * TAUNTS.length) | 0;
     ai.taunt = { i, until: now + TAUNTS[i][1] };
     if (game.state === "point") game.timer = Math.max(game.timer, TAUNTS[i][1]);
   }
@@ -870,7 +893,7 @@ function aiStep(me) {
   // the shot: only one that lands in their court (from deep in ours a drop falls short into the net, and close
   // under the net a drive goes into it), the smart one the hardest to return, the others by habit
   const chooseShot = (serve) => {
-    const r = Math.random(), opNearNet = Math.abs(op.x - NET_X) < 60, opDeep = Math.abs(op.x - NET_X) > 130;
+    const r = randomUnit(), opNearNet = Math.abs(op.x - NET_X) < 60, opDeep = Math.abs(op.x - NET_X) > 130;
     const shots = shotOptions(me, op, S.state === "fly" ? (predictShuttle(1.5 * DT)[0] ?? S) : S), ok = shots.map((o) => o.dir);
     let dir = L.smart ? killerShot(shots) : null;
     if (dir === null) {
@@ -878,7 +901,7 @@ function aiStep(me) {
         : opNearNet ? (r < 0.6 ? "" : "back")
         : opDeep ? (r < 0.5 ? "down" : r < 0.8 ? "fwd" : "")
         : ["", "fwd", "back", "down"][(r * 4) | 0];
-      if (ok.length && !ok.includes(dir)) dir = ok[(Math.random() * ok.length) | 0];
+      if (ok.length && !ok.includes(dir)) dir = ok[(randomUnit() * ok.length) | 0];
     }
     ai.shotKeys = keysFor(dir);
     ai.shotUntil = now + 0.22;
@@ -902,8 +925,8 @@ function aiStep(me) {
     ai.plan = null;
     ai.reactAt = now + (S.last === op ? L.react : 0);
     ai.err = rand(-L.aimErr, L.aimErr);
-    ai.skip = S.last === op && Math.random() < L.miss;
-    ai.wantSmash = Math.random() < L.smash;
+    ai.skip = S.last === op && randomUnit() < L.miss;
+    ai.wantSmash = randomUnit() < L.smash;
     ai.guardAt = 0;
     ai.airDash = null;
   }
@@ -968,7 +991,7 @@ function aiStep(me) {
   }
 
   // zap the other player now and then, when nothing more urgent is going on
-  if (me.cd.zap <= 0 && !me.act && me.ground && op.ground && Math.abs(op.x - me.x) > 50 && left > 0.8 && Math.random() < L.zap * DT) press("zap");
+  if (me.cd.zap <= 0 && !me.act && me.ground && op.ground && Math.abs(op.x - me.x) > 50 && left > 0.8 && randomUnit() < L.zap * DT) press("zap");
   // smart: once our shot is on its way, send a bolt to stun them in the last moment before they must hit it
   // (the stun outlasts that moment, so only a jump over the bolt saves them)
   if (L.smart && S.last === me && me.cd.zap <= 0 && !me.act && me.ground && op.ground && canBeHit(op) && op.stun <= 0) {
@@ -982,7 +1005,7 @@ function aiStep(me) {
     const gap = (me.x - b.x) * Math.sign(b.vx);
     if (gap > 0 && gap < 70 && me.ground) {
       ai.dodged.add(b.seed);
-      if (Math.random() < L.dodge) press("up");
+      if (randomUnit() < L.dodge) press("up");
     }
   }
   if (ai.dodged.size > 50) ai.dodged.clear();
@@ -990,7 +1013,7 @@ function aiStep(me) {
 
 // One frame of the game itself: everything in the state (saveState), nothing that is only for show. Online it may
 // run again for a frame already played (see rollback.js), so it must give the same result from the same state and
-// keys in any browser: no Math.random (srand), and detmath.js for sin, cos, atan2 and hypot.
+// keys in any browser: use srand() for gameplay randomness, and detmath.js for sin, cos, atan2 and hypot.
 // Returns true when the world moved (not paused or in a hit-stop).
 function simStep(dt) {
   if (game.hold) return false; // debug: freeze the world for screenshots
@@ -1008,7 +1031,8 @@ function simStep(dt) {
 
   // Use the same idle facing for AI planning and the swing it requests.
   for (const p of PLAYERS) {
-    if (!brainOf(p)) continue;
+    const brain = brainOf(p);
+    if (!brain || isReturnBlend(brain)) continue;
     if (game.state === "rally" && S.state === "fly" && S.last !== p) updateFacing(p);
     aiStep(p);
   }
@@ -1047,6 +1071,20 @@ function showStep(dt) {
 function step(dt) {
   if (simStep(dt)) showStep(dt);
   syncStatus();
+  // Supply next-frame input. Online rollback uses simStep, not this controller.
+  if (!FORECAST && net.mode === "local" && !net.rb && !game.paused && !game.hold) {
+    for (const p of PLAYERS) {
+      const brain = brainOf(p);
+      if (!isReturnBlend(brain)) continue;
+      brain.controller ??= makeReturnBlend(engine, forecastCourt, p.id, brain.src, () => {
+        const opponent = brainOf(other(p));
+        if (!opponent || isReturnBlend(opponent)) return null;
+        const { src, on, lastBy, controller, ...memory } = opponent;
+        return { memory, lastBy: lastBy?.id ?? 0 };
+      });
+      brain.controller.tick();
+    }
+  }
 }
 
 // ---------------------------------------------------------------- drawing
@@ -1308,7 +1346,7 @@ function toTitle() {
 }
 function makeCode() {
   const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  return Array.from({ length: 5 }, () => A[(Math.random() * A.length) | 0]).join("");
+  return Array.from({ length: 5 }, () => A[(randomUnit() * A.length) | 0]).join("");
 }
 function leave(silent) {
   try { net.game?.close(); net.ctl?.close(); net.peer?.destroy(); } catch {}
@@ -1373,14 +1411,14 @@ function gameChannelReady(conn) {
 // the host starts the match once both channels are up: the same seed on both sides, from frame 0
 function maybeStart() {
   if (net.mode !== "host" || net.rb || !net.gameReady || !net.peerReady) return;
-  const seed = (Math.random() * 2 ** 32) >>> 0;
+  const seed = (randomUnit() * 2 ** 32) >>> 0;
   sendCtl({ t: "start", seed });
   startSession(seed);
 }
 function sendGame(buf) {
   if (NETSIM) {
-    const spike = Math.random() < NETSIM.spikes ? 100 + Math.random() * 150 : 0;
-    if (Math.random() >= NETSIM.loss) workerTimeout(NETSIM.lag + Math.random() * NETSIM.jitter + spike, () => sendGameNow(buf));
+    const spike = randomUnit() < NETSIM.spikes ? 100 + randomUnit() * 150 : 0;
+    if (randomUnit() >= NETSIM.loss) workerTimeout(NETSIM.lag + randomUnit() * NETSIM.jitter + spike, () => sendGameNow(buf));
   } else sendGameNow(buf);
 }
 function sendGameNow(buf) {
@@ -1665,7 +1703,7 @@ function isMacChrome(ua = navigator.userAgent, brands = navigator.userAgentData?
   if (brands?.length) return brands.some((b) => b.brand === "Google Chrome");
   return /Chrome\/\d/.test(ua) && !/Edg\/|OPR\/|Whale\/|Vivaldi|Electron|CriOS/.test(ua);
 }
-(() => {
+if (!FORECAST) (() => {
   const note = document.getElementById("browser-note");
   if (!note) return;
   const force = new URLSearchParams(location.search).has("browsernote"); // to look at the note in any browser
@@ -1826,8 +1864,8 @@ async function joinRoom(raw) {
 
 // ---- touch controls (phones and tablets): on-screen buttons that press the 1P keys
 // 1P keys work for both players online (each side may use either layout), so one set of buttons covers it.
-const TOUCH = matchMedia("(pointer: coarse)").matches || new URLSearchParams(location.search).has("touch");
-(() => {
+const TOUCH = !FORECAST && (matchMedia("(pointer: coarse)").matches || new URLSearchParams(location.search).has("touch"));
+if (!FORECAST) (() => {
   const pad = document.getElementById("pad");
   if (!TOUCH || !pad) return;
   document.body.classList.add("touch");
@@ -1934,7 +1972,7 @@ function setupPlayMode() {
 }
 
 // ---- the online panel under the game
-const ui = (() => {
+const ui = FORECAST ? { status() {}, sync() {}, ping() {} } : (() => {
   const $ = (id) => document.getElementById(id);
   const el = { host: $("btn-host"), join: $("btn-join"), leave: $("btn-leave"), code: $("room-input"), status: $("net-status"), room: $("room-code"), ping: $("net-ping") };
   if (!el.host) return { status() {}, sync() {}, ping() {} };
@@ -1991,9 +2029,11 @@ const ui = (() => {
   };
 })();
 
+if (!FORECAST) forecastCourt = (await import("./game.js?forecast")).forecastEngine;
+
 // ---- choosing the opponent: the AI at one of five levels, an AI from the AI Unlimited list, or two people on one
 // device. The AI Unlimited button opens the list and picks its last choice (the first AI to begin with).
-(() => {
+if (!FORECAST) (() => {
   const list = document.getElementById("unlimited-list"), panel = document.getElementById("unlimited");
   // newest first: each AI joined by beating every one before it, so the newest is ranked 1 (gold, then silver, bronze)
   const ranked = [...UNLIMITED].reverse();
@@ -2045,8 +2085,8 @@ const ui = (() => {
 })();
 
 // ---------------------------------------------------------------- main loop
-const canvas = document.getElementById("screen"), ctx = canvas.getContext("2d");
-const img = new ImageData(W, H);
+const ctx = FORECAST ? null : document.getElementById("screen").getContext("2d");
+const img = FORECAST ? null : new ImageData(W, H);
 let last = performance.now(), acc = 0;
 // advance the game to `now`; drawing happens only in frameLoop
 function tick(now) {
@@ -2072,12 +2112,14 @@ function tick(now) {
 }
 // A hidden tab gets no animation frames, which would freeze an online game for both players.
 // Timers inside a worker keep running in the background, so they keep it ticking.
-const bgTicker = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 16)"], { type: "text/javascript" })));
-let lastFrame = performance.now();
-bgTicker.onmessage = () => {
-  const now = performance.now();
-  if (net.mode !== "local" && now - lastFrame > 100) tick(now); // frames have stalled: tab hidden or covered
-};
+if (!FORECAST) {
+  const bgTicker = new Worker(URL.createObjectURL(new Blob(["setInterval(() => postMessage(0), 16)"], { type: "text/javascript" })));
+  let lastFrame = performance.now();
+  bgTicker.onmessage = () => {
+    const now = performance.now();
+    if (net.mode !== "local" && now - lastFrame > 100) tick(now); // frames have stalled: tab hidden or covered
+  };
+}
 // setTimeout for the network simulator (?netsim): worker timers are not slowed down in a background tab
 const workerTimeout = (() => {
   let worker = null, n = 0;
@@ -2100,12 +2142,31 @@ function frameLoop(now) {
   const s = game.shakeT > 0 ? game.shakeA : 0;
   ctx.fillStyle = "#0b0a12";
   ctx.fillRect(0, 0, W, H);
-  ctx.putImageData(img, Math.round((Math.random() - 0.5) * 2 * s), Math.round((Math.random() - 0.5) * 2 * s));
+  ctx.putImageData(img, Math.round((randomUnit() - 0.5) * 2 * s), Math.round((randomUnit() - 0.5) * 2 * s));
 }
 P1.x = 96;
 P2.x = 288;
 followServer();
-requestAnimationFrame(frameLoop);
 
-// debug handle for testing in the console
-window.__pika = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+const engine = { game, P1, P2, S, effects, bolts, step, held, pressed, net, iceReport, natType, ai, setAI, setArena, aiLevels: AI_LEVELS, unlimited: UNLIMITED, toTitle, isMacChrome, saveState, loadState, hashState, keyDown, keyUp, tick: (t) => tick(t), renderOnce: () => (render(), composite(frame, img.data, BG)), paint: () => (render(), composite(frame, img.data, BG), ctx.putImageData(img, 0, 0)) };
+
+export const forecastEngine = FORECAST ? {
+  ...engine,
+  withForecastRandom(seed, fn) {
+    forecastRandom = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 2 ** 32;
+    try { return fn(); } finally { forecastRandom = null; }
+  },
+  setForecastOpponent(side, { memory, lastBy }) {
+    if (side === 2) setAI(memory.level);
+    else {
+      setAI(null);
+      p1Brain = { level: memory.level, src: { held: new Set(), pressed: new Set() }, ...newMemory() };
+      P1.src = p1Brain.src;
+    }
+    Object.assign(brainOf(byId(side)), structuredClone(memory), { lastBy: byId(lastBy) });
+  },
+} : null;
+if (!FORECAST) {
+  window.__pika = engine;
+  requestAnimationFrame(frameLoop);
+}
