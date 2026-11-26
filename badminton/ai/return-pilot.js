@@ -259,7 +259,7 @@ export function makePilot(
           ys[contactFrame] < 194 && ys[Math.min(start + 8, max)] < 194 ? ["", L, R] : ["", L, R, D];
         for (const key of keys) {
           const rate = (xsign(key) * 115 * 0.55) / 60;
-          const faces = maxx < o.x - 5 ? [1] : minx > o.x + 5 ? [-1] : [1, -1];
+          const faces = [1]; // AI returns toward the scoring court even if the human crosses the net.
           for (const face of faces) {
             const minFace = face > 0 ? minx : Math.max(minx, o.x - 2),
               maxFace = face > 0 ? Math.min(maxx, o.x + 2) : maxx;
@@ -366,8 +366,8 @@ export function makePilot(
     }
     const end = f.at(-1);
     const meet = f.find((v) => v.x > 201 && v.y > 123 && v.vy > 0) ?? end;
-    const baseGuard =
-      end.x > 193 && end.x < 367 && end.y >= 196 && meet.x < 240 ? guardX + 14 : guardX;
+    const baseGuard = end.x > 193 && end.x < 367 && end.y >= 196
+      ? clamp(guardX + (255 - meet.x) * 0.54, 92, 161) : guardX;
     // Vary court recovery only in an established return loop. No movement rule changes.
     const target =
       stallGuard && tactic && breakReturns >= 18
