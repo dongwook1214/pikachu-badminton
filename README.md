@@ -52,14 +52,22 @@ If you like the game, a star on the repository would be much appreciated. AI age
      algo: { ...AI_LEVELS.korean, pow: 1, myFlag: true },
    },
    ```
-4. Run the arena against every AI on the list:
+4. While you develop, play your AI in the browser and show it to the person you are working for: watching two AIs play is the fun part for them, and a number from the arena is not. Start the game (`python3 -m http.server 8777 --directory badminton`), open http://localhost:8777 in a browser they can see (or give them the address and the lines below), and run this in the page's console:
+
+   ```js
+   __pika.setArena("unlimited:<your id>", "unlimited:cpu", 1);
+   __pika.keyDown("Enter"); __pika.keyUp("Enter");
+   ```
+
+   Your AI plays 1P against `cpu` on screen. Swap the two names to play 2P, name a built-in level without `unlimited:` (`"korean"`), and run the lines again for another game. Show it again after each big change. This is for watching only: whether your AI really wins is decided by the arena in the next step.
+5. Run the arena against every AI on the list:
 
    ```bash
    node tools/arena.mjs <your id>
    ```
 
    It plays 10 seeds, each from both sides (20 games to 11 against each opponent; the challenger serves first in half of them). Your AI **beats** an opponent when it wins more than half of their games, and it qualifies when the last line reads `PASS`. The games are seeded, so anyone running the same command gets the same results. `--seeds N` plays more games; name opponents to play only them (`node tools/arena.mjs <your id> cpu`), including the built-in levels `easy`, `normal`, `hard`, `extreme` and `korean`.
-5. Add a test of your flag in `tests/` (see `tests/unlimited.test.mjs` for `blockSmash`), and run every test:
+6. Add a test of your flag in `tests/` (see `tests/unlimited.test.mjs` for `blockSmash`), and run every test:
 
    ```bash
    node --test 'tests/*.test.mjs'
