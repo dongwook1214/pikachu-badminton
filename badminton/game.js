@@ -12,6 +12,8 @@ import { zigzag, crackle } from "./vendor/pixelfx/src/fx/lightning/_lib.js";
 // the game's own math goes through detmath.js so that two browsers playing online stay identical (rollback.js)
 import { dsin, dcos, datan2, dhypot } from "./detmath.js";
 import { Rollback } from "./rollback.js";
+import { courtPilot } from "./ai/court-pilot.js";
+import { RETURN_BLEND } from "./ai/return-config.js";
 
 // ---------------------------------------------------------------- world
 const W = 384, H = 216, FLOOR = 196, NET_X = 192, NET_TOP = 160, NET_BOTTOM = 184, COURT_L = 16, COURT_R = 368;
@@ -615,11 +617,16 @@ const UNLIMITED = [
     id: "dragon", name: "DRAGON", ko: "드래곤", by: "dongwook1214",
     algo: { ...AI_LEVELS.korean, pow: 1, lookahead: true },
   },
+  // AI: GPT-6.2 Sol (OpenAI), effort: xhigh
+  {
+    id: "return-blend", name: "RETURN BLEND", ko: "리턴 블렌드", by: "yhc125",
+    algo: { ...AI_LEVELS.korean, pow: 1, returnBlend: true },
+  },
 ];
 for (const u of UNLIMITED) AI_LEVELS[`unlimited:${u.id}`] = { ...u.algo, name: u.name, ko: u.ko, by: u.by, unlimited: true };
 // A brain: one AI player's level, its input source and what it remembers between frames. `ai` is 2P's (with `on`
 // telling whether 2P is an AI at all); 1P gets one only in the arena (setArena), where two AIs play each other.
-const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, taunt: null, dodged: new Set(), lookSeed: 0 });
+const newMemory = () => ({ plan: null, lastBy: null, reactAt: 0, replanAt: 0, err: 0, skip: false, wantSmash: false, shotKeys: [], shotUntil: 0, serveAt: 0, guard: null, guardAt: 0, airDash: null, taunt: null, dodged: new Set(), lookSeed: 0, returnBlend: null });
 const ai = { on: false, level: "normal", src: AI_SRC, ...newMemory() };
 let p1Brain = null;
 const brainOf = (p) => (p === P2 ? (ai.on ? ai : null) : p1Brain);
@@ -1056,6 +1063,16 @@ function aiStep(me) {
   const held = ai.src.held, press = (a) => ai.src.pressed.add(k[a][0]), hold = (a) => held.add(k[a][0]);
   ai.src.pressed.clear();
   held.clear();
+  // AI: GPT-6.2 Sol (OpenAI), effort: xhigh
+  if (L.returnBlend) {
+    if (game.state === "title" || game.state === "over" || (game.state === "point" && game.pointWinner?.score >= WIN)) {
+      ai.returnBlend = null;
+      return;
+    }
+    ai.returnBlend ??= courtPilot({ game, P1, P2, S, bolts }, me.id, RETURN_BLEND);
+    ai.returnBlend(hold, press);
+    return;
+  }
   if (!gloating(me)) ai.taunt = null;
   else return void (me.stun <= 0 && !me.knocked && !game.paused && tauntStep(me, op, now, hold, press));
   if (game.state === "title" || game.state === "over" || game.paused || me.stun > 0 || me.knocked) return;

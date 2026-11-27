@@ -1,0 +1,118 @@
+import { makePilot, L, R, U, D, F, H } from "./return-pilot.js";
+
+const actions = { [L]: "left", [R]: "right", [U]: "up", [D]: "down", [F]: "basic", [H]: "quick" };
+const WIDTH = 384;
+
+export function courtPilot(engine, side, config) {
+  const { game, P1, P2, S, bolts } = engine;
+  const flip = side === 2;
+  const viewPlayer = (p) =>
+    Object.freeze({
+      get x() {
+        return flip ? WIDTH - p.x : p.x;
+      },
+      get y() {
+        return p.y;
+      },
+      get vx() {
+        return flip ? -p.vx : p.vx;
+      },
+      get vy() {
+        return p.vy;
+      },
+      get face() {
+        return flip ? -p.face : p.face;
+      },
+      get ground() {
+        return p.ground;
+      },
+      get quickT() {
+        return p.quickT;
+      },
+      get dashX() {
+        return flip ? -p.dashX : p.dashX;
+      },
+      get dashY() {
+        return p.dashY;
+      },
+      get iframes() {
+        return p.iframes;
+      },
+      get act() {
+        return p.act && Object.freeze({ ...p.act });
+      },
+      get cd() {
+        return Object.freeze({ ...p.cd });
+      },
+      get noHit() {
+        return p.noHit;
+      },
+      get stun() {
+        return p.stun;
+      },
+      get knocked() {
+        return p.knocked;
+      },
+    });
+  const left = viewPlayer(P1),
+    right = viewPlayer(P2);
+  const ref = (p) => (p === P1 ? left : p === P2 ? right : null);
+  const observations = {
+    P1: flip ? right : left,
+    P2: flip ? left : right,
+    game: Object.freeze({
+      get time() {
+        return game.time;
+      },
+      get state() {
+        return game.state;
+      },
+      get paused() {
+        return game.paused;
+      },
+      get server() {
+        return ref(game.server);
+      },
+    }),
+    S: Object.freeze({
+      get x() {
+        return flip ? WIDTH - S.x : S.x;
+      },
+      get y() {
+        return S.y;
+      },
+      get vx() {
+        return flip ? -S.vx : S.vx;
+      },
+      get vy() {
+        return S.vy;
+      },
+      get state() {
+        return S.state;
+      },
+      get last() {
+        return ref(S.last);
+      },
+    }),
+    // Keep the same collection identity because the pilot captures it once.
+    bolts: [],
+  };
+  const pilot = makePilot(observations, config);
+  const action = (key) => key === L && flip ? "right" : key === R && flip ? "left" : actions[key];
+  return (hold, press) => {
+    observations.bolts.length = 0;
+    for (const b of bolts)
+      observations.bolts.push(
+        Object.freeze({
+          owner: ref(b.owner),
+          x: flip ? WIDTH - b.x : b.x,
+          y: b.y,
+          vx: flip ? -b.vx : b.vx,
+          life: b.life,
+        }),
+      );
+    const { held, pressed } = pilot();
+    for (const key of held) hold(action(key));
+    for (const key of pressed) press(action(key));
+  };
+}
